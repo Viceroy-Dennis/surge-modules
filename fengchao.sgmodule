@@ -1,0 +1,19 @@
+#!name=蜂巢每日签到
+#!desc=蜂巢论坛 (pting.club) 每日自动签到。登录论坛后打开任意页自动捕获 Cookie，每天 09:14 自动签到，自带体检与手动测试入口。
+#!arguments=capture:蜂巢抓包
+#!arguments-desc=Cookie 抓包默认开启（参数值即脚本名）。在 Safari 登录 pting.club 后打开任意页即可自动捕获凭据；抓取成功后把参数改成 # 即可关闭抓包。
+#!category=自动任务
+
+[Script]
+# 1. 登录 Cookie 抓包 (自动过滤临时 WAF Cookie，捕获成功弹通知)
+{{{capture}}} = type=http-request,pattern=^https:\/\/pting\.club\/,requires-body=false,max-size=0,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/fengchao/fengchao_capture.js,script-update-interval=0
+
+# 2. 定时自动签到 (每天 09:14 执行)
+蜂巢自动签到 = type=cron,cronexp=14 9 * * *,timeout=60,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/fengchao/fengchao_task.js,script-update-interval=0
+
+# 3. 手动测试与体检入口 (在 Surge 脚本列表直接点击)
+蜂巢手动签到 = type=generic,timeout=60,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/fengchao/fengchao_task.js,script-update-interval=0
+蜂巢体检测试 = type=generic,timeout=60,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/fengchao/fengchao_test.js,script-update-interval=0
+
+[MITM]
+hostname = %APPEND% pting.club
