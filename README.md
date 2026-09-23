@@ -85,7 +85,23 @@ https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/taobao.sgmod
 | `taobao/taobao_test.js` | 综合体检与诊断（检查接口锁定状态、_m_h5_tk 令牌、金币余额） |
 | `taobao/taobao_capture.js` | 接口与凭据抓包（分级锁定 Rank3 核心签到接口，合并 Cookie 池） |
 
+---
+
+## 6. 途虎养车每日签到
+
+**模块安装 URL**（Surge → 模块 → 安装 → 粘贴）：
+```text
+https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/tuhu.sgmodule
+```
+
+| 文件路径 | 说明 |
+|---|---|
+| `tuhu.sgmodule` | 模块本体：双签任务、Token 与设备风控抓包、手动测试与体检入口 |
+| `tuhu/tuhu_task.js` | 每日自动签到（每天 07:17 自动执行 App+微信小程序双签，积分抵现计算） |
+| `tuhu/tuhu_test.js` | 综合体检与诊断（检查 Token 存活状态、车主昵称、实时积分余额） |
+| `tuhu/tuhu_capture.js` | 凭据抓包（自动保存 Authorization 数组与 blackbox 设备风控凭证） |
+
 - **使用方法**：
-  1. 安装模块开启后，在手机淘宝打开「淘金币」页面，点一次签到。
-  2. Surge 弹出通知：`已锁定淘金币签到接口`。
-  3. 每天 09:18 自动通过 mtop 动态签名与重放完成签到，抓取成功后可把模块参数 `capture` 改为 `#` 关闭抓包。
+  1. 安装模块开启后，打开「途虎养车」App 或微信小程序。
+  2. Surge 弹出通知：`[途虎抓包] Token 获取成功 🎉`。
+  3. 每天 07:17 自动完成双签并汇报可抵扣现金，捕获成功后可将模块参数 `capture` 改为 `#` 关闭抓包。
