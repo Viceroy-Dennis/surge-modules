@@ -1,13 +1,18 @@
 // RE0 (re0.me) 综合体检与盾墙状态诊断脚本 (Surge Generic 专用)
-// 用途: 检查 Cloudflare 通行证 (cf_clearance)、Action ID、真实 UA 绑定状态
+// 用途: 一键实测 Cloudflare 穿透状态、Action ID 连通性与真实服务器响应文本
 
 const NAME = "RE0体检诊断";
 const K_COOKIE = "re0_cookie";
 const K_HDR = "re0_headers";
 const K_URL = "re0_url";
+const K_BODY = "re0_body";
 const K_ACT = "re0_action";
 const K_UA = "re0_ua";
 const K_TS = "re0_capture_time";
+
+const DEFAULT_HOME = "https://re0.me/";
+const DEFAULT_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148";
+const HOP = ["host", "connection", "content-length", "accept-encoding", "content-encoding", "transfer-encoding", "proxy-connection"];
 
 function cookieMap(s) {
   const o = {};
@@ -18,19 +23,31 @@ function cookieMap(s) {
   return o;
 }
 
+function checkCf(status, headers, body) {
+  const h = headers || {};
+  let cf = "";
+  for (const k in h) if (String(k).toLowerCase() === "cf-mitigated") cf = String(h[k]);
+  const str = String(body || "");
+  if (/just a moment|challenge-platform|_cf_chl_opt/i.test(str) || (Number(status) === 403 && (cf || /cloudflare/i.test(str)))) {
+    return cf || "challenge";
+  }
+  return "";
+}
+
 function main() {
-  console.log(`[${NAME}] ========== RE0 签到与盾墙体检开始 ==========`);
+  console.log(`[${NAME}] ========== RE0 签到与盾墙实测体检开始 ==========`);
   const rows = [];
 
   const cookie = $persistentStore.read(K_COOKIE) || "";
   const actId = $persistentStore.read(K_ACT) || "";
   const ua = $persistentStore.read(K_UA) || "";
+  const bodyPayload = $persistentStore.read(K_BODY) || "[false]";
   const capTime = $persistentStore.read(K_TS);
-  const targetUrl = $persistentStore.read(K_URL) || "https://re0.me/";
+  const targetUrl = $persistentStore.read(K_URL) || DEFAULT_HOME;
 
   if (!cookie && !actId) {
     rows.push("❌ 未检测到任何凭据");
-    rows.push("💡 请在 Surge 启用模块，用 Safari 打开 re0.me 并手动点一次签到");
+    rows.push("💡 请在 Safari 打开 re0.me 并手动点一次签到");
     const text = rows.join("\n");
     console.log(text);
     $notification.post(NAME, "未捕获凭据", text);
@@ -40,50 +57,84 @@ function main() {
 
   const cMap = cookieMap(cookie);
   const hasCf = Boolean(cMap.cf_clearance);
-  const hasHdh = Boolean(cMap.hdh_sa_token);
 
-  rows.push("🛡️ Cloudflare 盾墙通行状态:");
-  if (hasCf) {
-    rows.push(`  • cf_clearance: ✅ 已就绪 (${cMap.cf_clearance.slice(0, 10)}...)`);
-  } else {
-    rows.push("  • cf_clearance: ❌ 缺失 (可能会被 CF 403 拦截)");
-  }
+  rows.push("🛡️ 盾墙与指纹准备:");
+  rows.push(`  • cf_clearance: ${hasCf ? "✅ 已就绪" : "❌ 缺失 (需过 CF)"}`);
+  rows.push(`  • UA 指纹: ${ua ? "✅ 真实 Safari" : "⚠️ 默认 UA"}`);
+  rows.push(`  • Action ID: ${actId ? "✅ " + actId.slice(0, 10) + "..." : "❌ 缺失"}`);
 
-  if (ua) {
-    const isMobile = ua.includes("iPhone") || ua.includes("Mobile");
-    rows.push(`  • 真实 UA 绑定: ✅ 已对齐 (${isMobile ? "移动端 Safari" : "桌面端"})`);
-  } else {
-    rows.push("  • 真实 UA 绑定: ⚠️ 未捕获 (使用默认 UA)");
-  }
+  // 发起实测 POST
+  let saved = {};
+  try { saved = JSON.parse($persistentStore.read(K_HDR) || "{}"); } catch (e) {}
+  const h = {};
+  Object.keys(saved).forEach((k) => {
+    const lk = String(k).toLowerCase();
+    if (!HOP.includes(lk) && saved[k] !== undefined && saved[k] !== null && saved[k] !== "") {
+      h[lk] = String(saved[k]);
+    }
+  });
 
-  rows.push("\n🎯 Next.js Server Action 状态:");
-  if (actId) {
-    rows.push(`  • Action ID: ✅ 已锁定 (${actId.slice(0, 10)}...)`);
-  } else {
-    rows.push("  • Action ID: ❌ 未获取 (无法发起签到动作)");
-  }
+  h["content-type"] = "text/plain;charset=UTF-8";
+  h["accept"] = "text/x-component";
+  h["origin"] = "https://re0.me";
+  h["referer"] = targetUrl;
+  h["user-agent"] = ua || DEFAULT_UA;
+  h["cookie"] = cookie;
+  h["x-surge-task"] = "1";
+  if (actId) h["next-action"] = actId;
 
-  if (hasHdh) {
-    rows.push(`  • hdh_sa_token: ✅ 已取得 (${cMap.hdh_sa_token.slice(0, 8)}...)`);
-  } else {
-    rows.push("  • hdh_sa_token: ⚠️ 初始空 (脚本执行时会自动换取)");
-  }
+  console.log(`[${NAME}] 正在向 ${targetUrl} 发送实测试探...`);
 
-  if (capTime) {
-    const d = new Date(Number(capTime));
-    rows.push(`\n🕒 最近捕获时间: ${d.toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}`);
-  }
+  $httpClient.post({
+    url: targetUrl,
+    headers: h,
+    body: bodyPayload
+  }, (err, resp, resBody) => {
+    if (err) {
+      rows.push(`\n📡 连通测试: 失败 (${err})`);
+    } else {
+      const status = Number(resp && (resp.status || resp.statusCode)) || 0;
+      const resHeaders = resp && resp.headers ? resp.headers : {};
+      const cfBlocked = checkCf(status, resHeaders, resBody);
 
-  // 综合评价
-  let ready = hasCf && actId && ua;
-  rows.push(`\n📋 综合结论: ${ready ? "🟢 完美！已具备绕开 CF 盾墙的全部条件" : "🟡 建议在 Safari 页面内手动点一次签到补齐凭证"}`);
+      rows.push("\n📡 服务器实测响应:");
+      if (cfBlocked) {
+        rows.push(`  • 状态: ❌ 被 CF 盾墙拦截 (HTTP 403, ${cfBlocked})`);
+        rows.push("  • 解决: 在 Safari 打开 re0.me 过一次滑块/点击");
+      } else {
+        rows.push(`  • 盾墙穿透: 🟢 成功绕开！HTTP ${status}`);
 
-  const text = rows.join("\n");
-  console.log(`[${NAME}]\n${text}`);
-  console.log(`[${NAME}] ========== RE0 签到与盾墙体检结束 ==========`);
+        let resMsg = "";
+        try {
+          const j = JSON.parse(resBody);
+          resMsg = j.message || j.msg || "";
+        } catch (e) {}
 
-  $notification.post(NAME, ready ? "盾墙与凭据状态良好" : "凭据体检诊断", text);
-  $done({ summary: text });
+        if (!resMsg) {
+          const m = String(resBody || "").match(/"message"\s*:\s*"((?:[^"\\]|\\.)+)"/);
+          if (m) resMsg = m[1];
+        }
+
+        const ok = /签到成功|已签到|重复签到|明日再来|今日已签|已经签到|签到过了/.test(String(resBody || "")) ||
+                   /"success"\s*:\s*true/.test(String(resBody || ""));
+
+        if (ok) {
+          rows.push(`  • 业务结果: ✅ ${resMsg || "签到成功/已签过"}`);
+        } else if (resMsg) {
+          rows.push(`  • 业务提示: ⚠️ ${resMsg}`);
+        } else {
+          const cleanRaw = String(resBody || "").replace(/[\r\n\t]+/g, " ").slice(0, 100);
+          rows.push(`  • 原始返回: ${cleanRaw || "(空)"}`);
+        }
+      }
+    }
+
+    const text = rows.join("\n");
+    console.log(`[${NAME}]\n${text}`);
+    console.log(`[${NAME}] ========== RE0 签到与盾墙体检结束 ==========`);
+    $notification.post(NAME, "RE0 穿盾体检结果", text);
+    $done({ summary: text });
+  });
 }
 
 if (typeof $httpClient === "undefined") {
