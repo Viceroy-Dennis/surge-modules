@@ -1,8 +1,8 @@
 // 淘宝淘金币 —— Surge 抓包脚本 (http-request)
 // 核心原则：
-// 1. 严格过滤：坚决排除 getTimestamp / home 等系统通用接口，只锁定包含 coin / jinbi / sign 的真正淘金币接口！
-// 2. 门槛提升：只有 Rank >= 2 的业务接口才允许保存为回放目标！
-// 3. 持续吸纳 Cookie 池：提取 _m_h5_tk 与会话 Cookie
+// 1. 全域监听：捕获所有 *.m.taobao.com 接口，绝不因路径微小差异漏抓
+// 2. 实时日志：每个进来的 mtop 请求都在 Surge 日志打印一行，透明可视
+// 3. 智能捕获：无论在淘宝 App 还是 Safari 打开淘金币，只要包含 coin/sign/task/tangram 立即锁定并弹通知！
 
 const NAME = "淘金币抓包";
 const K_API = "tb_api";
@@ -29,12 +29,6 @@ function mergeCookie(a, b) {
   return Object.keys(map).map((k) => `${k}=${map[k]}`).join("; ");
 }
 
-function isMtopHost(u) {
-  const m = String(u || "").match(/^https?:\/\/([^/?]+)/i);
-  const host = m ? String(m[1]).toLowerCase() : "";
-  return /^(h5api|h5|api|acs)\.m\.taobao\.com$/.test(host);
-}
-
 function qparse(u) {
   const q = {};
   const i = String(u || "").indexOf("?");
@@ -47,32 +41,19 @@ function qparse(u) {
   return q;
 }
 
-// 接口优先级评定（彻底剔除通用系统接口）
-function apiRank(apiName, method) {
-  const a = String(apiName || "").toLowerCase();
-  if (!a) return 0;
-  if (String(method || "").toUpperCase() === "OPTIONS") return -1;
-
-  // 严禁将系统基础接口当作签到接口
-  if (/gettimestamp|getcity|unit\.get|client\.log|behavior/i.test(a)) {
-    return 0;
+function extractApi(url, bodyStr) {
+  let combined = url;
+  if (bodyStr && /api=|data=/.test(bodyStr)) {
+    combined = url.split("?")[0] + "?" + bodyStr;
   }
-
-  // Rank 3: 明确包含签到、领奖动作
-  if (/sign|checkin|signin|award|draw|receive/i.test(a) && /coin|jinbi|tangram|gold/i.test(a)) {
-    return 3;
+  const params = qparse(combined);
+  let api = String(params.api || "");
+  if (!api) {
+    const m = String(combined).match(/\/(mtop\.[a-zA-Z0-9._]+)\//);
+    if (m) api = m[1];
   }
-  if (/sign|checkin|signin|award|draw/i.test(a)) {
-    return 3;
-  }
-
-  // Rank 2: 淘金币任务、资产、资产聚合接口
-  if (/coin|jinbi|gold|tangram/i.test(a)) {
-    return 2;
-  }
-
-  // 其他接口一律不作为执行目标
-  return 0;
+  const ver = String(params.v || "") || (String(combined).match(/\/gw\/([0-9.]+)\//) || [])[1] || "1.0";
+  return { api, ver, params, combined };
 }
 
 try {
@@ -80,54 +61,56 @@ try {
     $done({});
   } else {
     const h = lower($request.headers || {});
+    // 防自身脚本回环
     if (h["x-surge-task"]) {
       $done({});
     } else {
       const url = String($request.url || "");
-      if (!isMtopHost(url)) {
+      const method = String($request.method || "GET").toUpperCase();
+
+      if (method === "OPTIONS" || /\.(png|jpg|jpeg|gif|webp|svg|css|ico|woff2?)$/i.test(url)) {
         $done({});
       } else {
-        const method = String($request.method || "GET").toUpperCase();
-        if (method === "OPTIONS") {
+        const ck = h["cookie"] || "";
+        const bodyStr = String($request.body || "");
+        const { api, ver, params, combined } = extractApi(url, bodyStr);
+
+        // 1. 持续合并 Cookie 池 (重点保留 _m_h5_tk)
+        if (ck) {
+          const oldCk = $persistentStore.read(K_COOKIE) || "";
+          const merged = mergeCookie(oldCk, ck);
+          if (merged && merged !== oldCk) {
+            $persistentStore.write(merged, K_COOKIE);
+            $persistentStore.write(String(Date.now()), K_TS);
+          }
+        }
+
+        // 2. 打印实时捕获日志 (Surge 控制台可见)
+        const hasTk = ck.includes("_m_h5_tk");
+        console.log(`[${NAME}] 捕获流量: ${method} api=${api || "(路径:" + url.slice(0, 40) + ")"} cookie=${ck ? "有(" + ck.length + "字,tk=" + hasTk + ")" : "无"}`);
+
+        // 3. 过滤系统无用时间戳等接口
+        if (!api || /gettimestamp|getcity|unit\.get|client\.log|behavior/i.test(api)) {
           $done({});
         } else {
-          // 1. 无论什么 mtop 请求，只要有 Cookie 就合并入池 (重点维护 _m_h5_tk)
-          const ck = h["cookie"] || "";
-          if (ck) {
-            const oldCk = $persistentStore.read(K_COOKIE) || "";
-            const merged = mergeCookie(oldCk, ck);
-            if (merged && merged !== oldCk) {
-              $persistentStore.write(merged, K_COOKIE);
-              $persistentStore.write(String(Date.now()), K_TS);
-            }
-          }
+          // 4. 判定是否为淘金币业务接口
+          const isCoinTarget = /coin|jinbi|gold|tangram|task|sign|award|draw|receive/i.test(api);
 
-          // 2. 提取 API 名
-          let bodyStr = String($request.body || "");
-          let mergedUrl = url;
-          if (bodyStr && /api=|data=/.test(bodyStr)) {
-            const bq = qparse("http://x/?" + bodyStr);
-            if (bq.api || bq.data) mergedUrl = url.split("?")[0] + "?" + bodyStr;
-          }
-
-          const parsedParams = qparse(mergedUrl);
-          const apiName = String(parsedParams.api || "") || (String(mergedUrl).match(/\/(mtop\.[a-zA-Z0-9._]+)\//) || [])[1] || "";
-          const ver = String(parsedParams.v || "") || (String(mergedUrl).match(/\/gw\/([0-9.]+)\//) || [])[1] || "1.0";
-
-          // 3. 严格评估接口 Rank（低于 2 分的一律不存）
-          const rank = apiRank(apiName, method);
-          if (rank < 2) {
+          if (!isCoinTarget) {
             $done({});
           } else {
+            // 计算 Rank: 明确含 sign/award/draw/receive 为 3，其余为 2
+            const rank = /sign|checkin|signin|award|draw|receive/i.test(api) ? 3 : 2;
+
             let cur = {};
             try { cur = JSON.parse($persistentStore.read(K_API) || "{}"); } catch (e) {}
             const curRank = Number(cur && cur.rank) || 0;
 
-            // 如果当前存的是被误杀的 getTimestamp，强制覆盖
-            const isInvalidCurrent = !cur.api || /gettimestamp/i.test(cur.api);
+            // 如果当前不是有效金币接口，或者新捕获接口 rank 更高，立刻锁定
+            const isInvalidCurrent = !cur.api || !/coin|jinbi|gold|tangram|task|sign/i.test(cur.api);
 
             if (!isInvalidCurrent && rank <= curRank) {
-              console.log(`[${NAME}] 捕获接口 rank=${rank} (当前已锁定 rank=${curRank}) 静默更新`);
+              console.log(`[${NAME}] 保持当前高优先级接口 (${cur.api})，静默更新数据`);
               $done({});
             } else {
               const clean = {};
@@ -136,12 +119,12 @@ try {
               });
 
               const rec = {
-                url: mergedUrl.split("?")[0],
+                url: combined.split("?")[0],
                 method: method,
-                params: parsedParams,
+                params: params,
                 headers: clean,
                 body: bodyStr.slice(0, 4000),
-                api: apiName,
+                api: api,
                 ver: ver,
                 rank: rank
               };
@@ -149,11 +132,11 @@ try {
               $persistentStore.write(JSON.stringify(rec), K_API);
               $persistentStore.write(String(Date.now()), K_TS);
 
-              console.log(`[${NAME}] 真正淘金币接口已锁定! rank=${rank} api=${apiName} ver=${ver}`);
+              console.log(`[${NAME}] 🎯 淘金币接口已锁定: Rank ${rank} -> ${api}`);
               $notification.post(
                 NAME,
-                `已锁定真正淘金币接口 (Rank ${rank})`,
-                `API: ${apiName}\n已生成全新 mtop 回放模板！`
+                `已成功锁定淘金币接口 (Rank ${rank})`,
+                `API: ${api}\nCookie: ${hasTk ? "✅ 含 _m_h5_tk" : "⚠️ 等待令牌刷新"}\n可立即去 Surge 执行签到测试！`
               );
               $done({});
             }
