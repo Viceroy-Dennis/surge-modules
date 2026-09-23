@@ -1,0 +1,19 @@
+#!name=RE0每日签到
+#!desc=re0.me 每日自动签到（Cloudflare 盾墙穿透 + Next.js Server Action 动作回放）。在 Safari 打开 re0.me 并手动点一次签到即可自动捕获凭据；自带体检与手动测试入口。
+#!arguments=capture:RE0抓包,mode:daily
+#!arguments-desc=capture: 抓包脚本名（默认开启）；捕获成功后可将参数值改为 # 关闭抓包防打扰。\nmode: 签到模式（daily=每日签到 / gamble=赌狗签到 / both=两个都签）。
+#!category=自动任务
+
+[Script]
+# 1. 登录凭据与 Action 抓包 (捕获 Action ID、真实 UA 与 cf_clearance)
+{{{capture}}} = type=http-request,pattern=^https:\/\/re0\.me\/,requires-body=true,max-size=262144,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/re0/re0_capture.js,script-update-interval=0
+
+# 2. 定时自动签到 (每天 09:14 执行)
+RE0自动签到 = type=cron,cronexp=14 9 * * *,timeout=60,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/re0/re0_task.js,script-update-interval=0,argument={{{mode}}}
+
+# 3. 手动测试与体检入口 (在 Surge 脚本列表直接点击)
+RE0手动签到 = type=generic,timeout=60,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/re0/re0_task.js,script-update-interval=0,argument={{{mode}}}
+RE0体检诊断 = type=generic,timeout=60,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/re0/re0_test.js,script-update-interval=0
+
+[MITM]
+hostname = %APPEND% re0.me
