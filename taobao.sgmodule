@@ -5,8 +5,8 @@
 #!category=自动任务
 
 [Script]
-# 1. 淘金币接口与凭据抓包 (自动分级锁定 rank3 签到接口，合并 Cookie 池，捕获成功弹通知)
-{{{capture}}} = type=http-request,pattern=^https:\/\/(h5api|h5|api|acs)\.m\.taobao\.com\/(h5\/|gw\/),requires-body=true,max-size=262144,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/taobao/taobao_capture.js,script-update-interval=0
+# 1. 淘金币接口与凭据抓包 (全域监听 *.m.taobao.com，捕获成功即时弹窗)
+{{{capture}}} = type=http-request,pattern=^https:\/\/[^/]*\.m\.taobao\.com\/,requires-body=true,max-size=262144,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/taobao/taobao_capture.js,script-update-interval=0
 
 # 2. 定时自动签到任务 (每天 09:18 自动执行)
 淘金币自动签到 = type=cron,cronexp=18 9 * * *,timeout=60,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/taobao/taobao_task.js,script-update-interval=0
@@ -16,4 +16,4 @@
 淘金币体检测试 = type=generic,timeout=60,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/taobao/taobao_test.js,script-update-interval=0
 
 [MITM]
-hostname = %APPEND% h5api.m.taobao.com, h5.m.taobao.com, api.m.taobao.com, acs.m.taobao.com
+hostname = %APPEND% *.m.taobao.com, h5api.m.taobao.com, acs.m.taobao.com, trade-acs.m.taobao.com, guide-acs.m.taobao.com
