@@ -1,0 +1,19 @@
+#!name=三国咸话每日任务
+#!desc=三国咸话小程序自动任务（打开小程序 + 每日签到 + 浏览帖子3次 + 自动领取奖励）。自带体检测试入口。
+#!arguments=capture:咸话抓包
+#!arguments-desc=登录凭据抓包默认开启（参数值即脚本名）。打开微信三国咸话小程序即可自动捕获凭据；抓取成功后把参数改成 # 即可关闭抓包。
+#!category=自动任务
+
+[Script]
+# 1. 登录凭据抓包 (仅凭据更新时弹通知)
+{{{capture}}} = type=http-request,pattern=^https:\/\/(api-xh|wxforum|xh|hi-gateway|api-forum-act|xianhua)\.sanguosha\.cn\/,requires-body=false,max-size=0,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/xianhua/xianhua_capture.js,script-update-interval=0
+
+# 2. 定时任务 (每天 09:15 自动执行)
+三国咸话自动任务 = type=cron,cronexp=15 9 * * *,timeout=90,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/xianhua/xianhua_task.js,script-update-interval=0
+
+# 3. 手动测试与诊断入口
+三国咸话手动执行 = type=generic,timeout=90,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/xianhua/xianhua_task.js,script-update-interval=0
+三国咸话体检测试 = type=generic,timeout=60,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/xianhua/xianhua_test.js,script-update-interval=0
+
+[MITM]
+hostname = %APPEND% api-xh.sanguosha.cn, wxforum.sanguosha.cn, xh.sanguosha.cn, hi-gateway.sanguosha.cn, api-forum-act.sanguosha.cn, xianhua.sanguosha.cn
