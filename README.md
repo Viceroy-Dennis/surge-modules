@@ -14,6 +14,7 @@ https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/bilibili.sgm
 |---|---|
 | bilibili.sgmodule | 模块：主站+直播+漫画任务、Cookie 抓包、手动测试入口 |
 | bilibili_main.js | 主站每日任务（观看/分享/投币/大会员签到） |
+| bilibili_test.js | 全任务综合测试与诊断（账号/经验/任务状态/接口连通体检） |
 | live_task.js | 直播签到+粉丝牌任务 |
 | silver2coin.js | 银瓜子换硬币 |
 | manga_task.js | 漫画签到（兼 Cookie 抓包） |
