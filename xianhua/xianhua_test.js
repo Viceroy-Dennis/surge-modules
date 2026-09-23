@@ -11,6 +11,15 @@ const LIST_URL = "https://api-xh.sanguosha.cn/task/sgxh-task/taskList";
 
 const DROP = { host: 1, connection: 1, "keep-alive": 1, "proxy-connection": 1, "transfer-encoding": 1, "content-length": 1, "content-encoding": 1, "accept-encoding": 1 };
 
+function cookieMap(cookie) {
+  const o = {};
+  String(cookie || "").split(";").forEach((p) => {
+    const i = p.indexOf("=");
+    if (i > 0) o[p.slice(0, i).trim()] = p.slice(i + 1).trim();
+  });
+  return o;
+}
+
 function savedHeaders() {
   let saved = {};
   try {
@@ -26,8 +35,14 @@ function savedHeaders() {
   const cookie = $persistentStore.read(COOKIE_KEY);
   if (cookie) h.cookie = cookie;
   const token = $persistentStore.read(TOKEN_KEY);
-  if (token && !h.authorization && !h.token && !h["x-token"] && !h["x-auth-token"]) {
-    h.authorization = token;
+  if (token) {
+    if (!h.authorization && !h.token && !h["x-token"] && !h["x-auth-token"]) {
+      h.authorization = token;
+    }
+    const ck = cookieMap(h.cookie || "");
+    if (!ck.token) {
+      h.cookie = h.cookie ? h.cookie + "; token=" + token : "token=" + token;
+    }
   }
   return h;
 }
