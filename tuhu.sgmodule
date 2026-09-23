@@ -1,0 +1,19 @@
+#!name=途虎养车每日签到
+#!desc=途虎养车每日自动签到（双签任务：App 签到 + 微信小程序签到，积分可抵扣保养/洗车现金）。进入途虎 App 或微信小程序自动捕获 Token 与设备风控值；自带体检与手动测试入口。
+#!arguments=capture:途虎抓包
+#!arguments-desc=Token 抓包默认开启（参数值即脚本名）。打开途虎养车 App 或小程序即可自动捕获凭据；捕获成功后把参数改成 # 即可关闭抓包。
+#!category=自动任务
+
+[Script]
+# 1. 登录 Token 与设备凭据抓包 (支持多账号，捕获成功弹通知)
+{{{capture}}} = type=http-request,pattern=^https:\/\/[\w.-]*tuhu\.cn\/,requires-body=false,max-size=0,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/tuhu/tuhu_capture.js,script-update-interval=0
+
+# 2. 定时自动双签任务 (每天 07:17 自动执行)
+途虎自动签到 = type=cron,cronexp=17 7 * * *,timeout=60,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/tuhu/tuhu_task.js,script-update-interval=0
+
+# 3. 手动执行与体检入口 (在 Surge 脚本列表直接点击)
+途虎手动签到 = type=generic,timeout=60,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/tuhu/tuhu_task.js,script-update-interval=0
+途虎体检测试 = type=generic,timeout=60,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/tuhu/tuhu_test.js,script-update-interval=0
+
+[MITM]
+hostname = %APPEND% api.tuhu.cn, cl-gateway.tuhu.cn, *.tuhu.cn
