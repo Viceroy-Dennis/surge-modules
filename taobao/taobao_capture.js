@@ -1,9 +1,8 @@
 // 淘宝淘金币 —— Surge 抓包脚本 (http-request)
-// 功能：自动捕获与学习淘金币 mtop 签到接口与会话 Cookie 池
-// 机制：
-// 1. rank 制分级锁定（rank3: 签到接口 > rank2: 金币/任务接口 > rank1: 普通 mtop）
-// 2. 持续合并与更新 Cookie 池（包含最重要的 _m_h5_tk 与会话鉴权）
-// 3. 极致降噪：只有初次锁定更高 rank 接口时弹窗通知，其余请求静默更新
+// 核心原则：
+// 1. 严格过滤：坚决排除 getTimestamp / home 等系统通用接口，只锁定包含 coin / jinbi / sign 的真正淘金币接口！
+// 2. 门槛提升：只有 Rank >= 2 的业务接口才允许保存为回放目标！
+// 3. 持续吸纳 Cookie 池：提取 _m_h5_tk 与会话 Cookie
 
 const NAME = "淘金币抓包";
 const K_API = "tb_api";
@@ -48,18 +47,32 @@ function qparse(u) {
   return q;
 }
 
-function apiRank(u, method) {
-  const p = qparse(u);
-  let a = String(p.api || "");
-  if (!a) {
-    const m = String(u || "").match(/\/(mtop\.[a-zA-Z0-9._]+)\//);
-    if (m) a = m[1];
-  }
+// 接口优先级评定（彻底剔除通用系统接口）
+function apiRank(apiName, method) {
+  const a = String(apiName || "").toLowerCase();
   if (!a) return 0;
   if (String(method || "").toUpperCase() === "OPTIONS") return -1;
-  if (/sign|checkin|signin|award|draw|receive/i.test(a)) return 3;
-  if (/coin|jinbi|point|task|daily/i.test(a)) return 2;
-  return 1;
+
+  // 严禁将系统基础接口当作签到接口
+  if (/gettimestamp|getcity|unit\.get|client\.log|behavior/i.test(a)) {
+    return 0;
+  }
+
+  // Rank 3: 明确包含签到、领奖动作
+  if (/sign|checkin|signin|award|draw|receive/i.test(a) && /coin|jinbi|tangram|gold/i.test(a)) {
+    return 3;
+  }
+  if (/sign|checkin|signin|award|draw/i.test(a)) {
+    return 3;
+  }
+
+  // Rank 2: 淘金币任务、资产、资产聚合接口
+  if (/coin|jinbi|gold|tangram/i.test(a)) {
+    return 2;
+  }
+
+  // 其他接口一律不作为执行目标
+  return 0;
 }
 
 try {
@@ -67,7 +80,6 @@ try {
     $done({});
   } else {
     const h = lower($request.headers || {});
-    // 防回环
     if (h["x-surge-task"]) {
       $done({});
     } else {
@@ -79,7 +91,7 @@ try {
         if (method === "OPTIONS") {
           $done({});
         } else {
-          // 1. 维护 Cookie 池
+          // 1. 无论什么 mtop 请求，只要有 Cookie 就合并入池 (重点维护 _m_h5_tk)
           const ck = h["cookie"] || "";
           if (ck) {
             const oldCk = $persistentStore.read(K_COOKIE) || "";
@@ -90,35 +102,38 @@ try {
             }
           }
 
-          // 2. 检查接口 rank 分级
-          const rank = apiRank(url, method);
-          if (rank <= 0) {
+          // 2. 提取 API 名
+          let bodyStr = String($request.body || "");
+          let mergedUrl = url;
+          if (bodyStr && /api=|data=/.test(bodyStr)) {
+            const bq = qparse("http://x/?" + bodyStr);
+            if (bq.api || bq.data) mergedUrl = url.split("?")[0] + "?" + bodyStr;
+          }
+
+          const parsedParams = qparse(mergedUrl);
+          const apiName = String(parsedParams.api || "") || (String(mergedUrl).match(/\/(mtop\.[a-zA-Z0-9._]+)\//) || [])[1] || "";
+          const ver = String(parsedParams.v || "") || (String(mergedUrl).match(/\/gw\/([0-9.]+)\//) || [])[1] || "1.0";
+
+          // 3. 严格评估接口 Rank（低于 2 分的一律不存）
+          const rank = apiRank(apiName, method);
+          if (rank < 2) {
             $done({});
           } else {
             let cur = {};
             try { cur = JSON.parse($persistentStore.read(K_API) || "{}"); } catch (e) {}
             const curRank = Number(cur && cur.rank) || 0;
 
-            // 只升不降
-            if (rank <= curRank) {
-              console.log(`[${NAME}] 捕获接口 rank=${rank} (当前已锁定 rank=${curRank}) 静默更新 Cookie`);
+            // 如果当前存的是被误杀的 getTimestamp，强制覆盖
+            const isInvalidCurrent = !cur.api || /gettimestamp/i.test(cur.api);
+
+            if (!isInvalidCurrent && rank <= curRank) {
+              console.log(`[${NAME}] 捕获接口 rank=${rank} (当前已锁定 rank=${curRank}) 静默更新`);
               $done({});
             } else {
               const clean = {};
               Object.keys(h).forEach((k) => {
                 if (!HOP[k] && h[k] !== undefined && h[k] !== "") clean[k] = String(h[k]);
               });
-
-              let bodyStr = String($request.body || "");
-              let mergedUrl = url;
-              if (bodyStr && /api=|data=/.test(bodyStr)) {
-                const bq = qparse("http://x/?" + bodyStr);
-                if (bq.api || bq.data) mergedUrl = url.split("?")[0] + "?" + bodyStr;
-              }
-
-              const parsedParams = qparse(mergedUrl);
-              const apiName = String(parsedParams.api || "") || (String(mergedUrl).match(/\/(mtop\.[a-zA-Z0-9._]+)\//) || [])[1] || "";
-              const ver = String(parsedParams.v || "") || (String(mergedUrl).match(/\/gw\/([0-9.]+)\//) || [])[1] || "1.0";
 
               const rec = {
                 url: mergedUrl.split("?")[0],
@@ -134,14 +149,12 @@ try {
               $persistentStore.write(JSON.stringify(rec), K_API);
               $persistentStore.write(String(Date.now()), K_TS);
 
-              console.log(`[${NAME}] 接口已锁定: rank=${rank} api=${apiName} ver=${ver}`);
-              if (rank >= 2) {
-                $notification.post(
-                  NAME,
-                  `已锁定淘金币${rank >= 3 ? "签到" : "任务"}接口`,
-                  `API: ${apiName}\n已自动生成 mtop 重签回放模板`
-                );
-              }
+              console.log(`[${NAME}] 真正淘金币接口已锁定! rank=${rank} api=${apiName} ver=${ver}`);
+              $notification.post(
+                NAME,
+                `已锁定真正淘金币接口 (Rank ${rank})`,
+                `API: ${apiName}\n已生成全新 mtop 回放模板！`
+              );
               $done({});
             }
           }
