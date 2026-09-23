@@ -7,7 +7,7 @@ Surge 模块与脚本存档（每日任务自动化）。
 安装：Surge → 模块 → 安装 → 粘贴 URL：
 
 ```
-https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/bilibili/bilibili.sgmodule
+https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/bilibili.sgmodule
 ```
 
 | 文件 | 说明 |
