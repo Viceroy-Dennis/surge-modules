@@ -1,0 +1,24 @@
+#!name=哔哩哔哩每日任务
+#!desc=主站每日任务(观看/分享/投币/大会员签到) + 直播签到/粉丝牌 + 银瓜子换硬币 + 漫画签到。主站任务无需 WBI 签名(实测存活)，不含 App 任务中心 UI 奖励领取。
+#!arguments=manga_cookie:哔哩漫画Cookie,live_cookie:B站直播Cookie,coin_count:1
+#!arguments-desc=Cookie 抓包默认开启，抓取成功后把对应参数值改成 # 即关闭该抓包；coin_count = 每天自动投币枚数(0=不投币，最多 5，投满 5 枚得 50 投币经验)，改成 # 同样视为不投币。
+#!category=自动任务
+
+[Script]
+# 抓包脚本：同一请求只执行第一条命中的 http-request，漫画必须排第一
+{{{manga_cookie}}} = type=http-request,pattern=^https:\/\/app\.bilibili\.com\/x\/v\d\/account\/myinfo,requires-body=false,max-size=0,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/bilibili/manga_task.js,script-update-interval=0
+{{{live_cookie}}} = type=http-request,pattern=^https:\/\/(www|live|api\.live|app)\.bilibili\.com\/,requires-body=false,max-size=0,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/bilibili/capture_live.js,script-update-interval=0
+
+# 定时任务
+B站主站每日任务 = type=cron,cronexp=8 9 * * *,timeout=120,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/bilibili/bilibili_main.js,script-update-interval=0,argument={{{coin_count}}}
+B站直播签到与粉丝牌 = type=cron,cronexp=14 9 * * *,timeout=300,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/bilibili/live_task.js,script-update-interval=0
+B站银瓜子换硬币 = type=cron,cronexp=17 9 * * *,timeout=60,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/bilibili/silver2coin.js,script-update-interval=0
+哔哩漫画签到 = type=cron,cronexp=20 9 * * *,timeout=60,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/bilibili/manga_task.js,script-update-interval=0
+
+# 手动测试
+B站主站每日任务手动测试 = type=generic,timeout=120,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/bilibili/bilibili_main.js,script-update-interval=0,argument={{{coin_count}}}
+B站直播手动测试 = type=generic,timeout=300,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/bilibili/live_task.js,script-update-interval=0
+哔哩漫画手动测试 = type=generic,timeout=60,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/bilibili/manga_task.js,script-update-interval=0
+
+[MITM]
+hostname = %APPEND% www.bilibili.com, live.bilibili.com, api.live.bilibili.com, app.bilibili.com
