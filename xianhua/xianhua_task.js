@@ -15,6 +15,15 @@ const REWARD_URL = "https://api-xh.sanguosha.cn/task/sgxh-task/taskReward";
 
 const DROP = { host: 1, connection: 1, "keep-alive": 1, "proxy-connection": 1, "transfer-encoding": 1, "content-length": 1, "content-encoding": 1, "accept-encoding": 1 };
 
+function cookieMap(cookie) {
+  const o = {};
+  String(cookie || "").split(";").forEach((p) => {
+    const i = p.indexOf("=");
+    if (i > 0) o[p.slice(0, i).trim()] = p.slice(i + 1).trim();
+  });
+  return o;
+}
+
 function savedHeaders() {
   let saved = {};
   try {
@@ -30,8 +39,14 @@ function savedHeaders() {
   const cookie = $persistentStore.read(COOKIE_KEY);
   if (cookie) h.cookie = cookie;
   const token = $persistentStore.read(TOKEN_KEY);
-  if (token && !h.authorization && !h.token && !h["x-token"] && !h["x-auth-token"]) {
-    h.authorization = token;
+  if (token) {
+    if (!h.authorization && !h.token && !h["x-token"] && !h["x-auth-token"]) {
+      h.authorization = token;
+    }
+    const ck = cookieMap(h.cookie || "");
+    if (!ck.token) {
+      h.cookie = h.cookie ? h.cookie + "; token=" + token : "token=" + token;
+    }
   }
   return h;
 }
@@ -49,6 +64,32 @@ function headersFor(url) {
 function hasCredential() {
   const h = savedHeaders();
   return Boolean(h.authorization || h.token || h["x-token"] || h["x-auth-token"] || h.cookie);
+}
+
+function parseJSON(body) {
+  try { return JSON.parse(body || "{}"); } catch (e) { return null; }
+}
+
+function messageOf(body) {
+  const j = parseJSON(body);
+  if (!j) return String(body || "").slice(0, 100) || "空响应";
+  return j.message || j.msg || (j.data && (j.data.message || j.data.msg)) || (j.success === true ? "成功" : "请求完成");
+}
+
+function isAuthError(r) {
+  if (r.status === 401 || r.status === 403) return true;
+  const str = String(r.body || "");
+  if (str.indexOf("未登录") !== -1 || str.indexOf("token已经过期") !== -1 || str.indexOf("token过期") !== -1 || str.indexOf("token失效") !== -1) {
+    return true;
+  }
+  return false;
+}
+
+function result(label, r) {
+  if (r.error) return `${label}: 请求失败 (${r.error})`;
+  if (isAuthError(r)) return `${label}: 登录凭据失效`;
+  if (r.status >= 200 && r.status < 300) return `${label}: ${messageOf(r.body)}`;
+  return `${label}: HTTP ${r.status} ${messageOf(r.body)}`;
 }
 
 function postJson(url, payload) {
@@ -90,23 +131,6 @@ function getJson(url) {
       }
     });
   });
-}
-
-function parseJSON(body) {
-  try { return JSON.parse(body || "{}"); } catch (e) { return null; }
-}
-
-function messageOf(body) {
-  const j = parseJSON(body);
-  if (!j) return String(body || "").slice(0, 100) || "空响应";
-  return j.message || j.msg || (j.data && (j.data.message || j.data.msg)) || (j.success === true ? "成功" : "请求完成");
-}
-
-function result(label, r) {
-  if (r.error) return `${label}: 请求失败 (${r.error})`;
-  if (r.status === 401 || r.status === 403) return `${label}: 登录凭据失效`;
-  if (r.status >= 200 && r.status < 300) return `${label}: ${messageOf(r.body)}`;
-  return `${label}: HTTP ${r.status} ${messageOf(r.body)}`;
 }
 
 const ID_FIELDS = ["taskId", "taskID", "task_id", "id", "taskCode"];
@@ -173,7 +197,7 @@ async function claimReward(t) {
       return r;
     }
     if (!first) first = r;
-    if (r.status === 401 || r.status === 403) break;
+    if (isAuthError(r)) break;
   }
   return first;
 }
@@ -182,8 +206,8 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function main() {
   if (!hasCredential()) {
-    const msg = "请先在 Surge 开启抓包模块，并进入一次三国咸话小程序保存凭据";
-    console.log(`[${NAME}] 没有登录凭据`);
+    const msg = "未检测到凭据，请在微信中打开一次「三国咸话」小程序自动保存";
+    console.log(`[${NAME}] ${msg}`);
     $notification.post(NAME, "未检测到凭据", msg);
     $done({ summary: msg });
     return;
@@ -194,29 +218,52 @@ async function main() {
   // 1. 打开小程序
   const openRes = await postJson(OPEN_URL, { flag: 1 });
   rows.push(result("打开任务", openRes));
-  await sleep(1000);
+  console.log(`[${NAME}] 打开小程序: HTTP ${openRes.status} ${messageOf(openRes.body)}`);
+  if (isAuthError(openRes)) {
+    const failMsg = "❌ Token 已过期 (401)\n💡 请在微信中重新进入「三国咸话」小程序刷新凭据后再运行";
+    console.log(`[${NAME}] 登录凭据失效，立即停止执行`);
+    $notification.post(NAME, "登录凭据已过期", failMsg);
+    $done({ summary: failMsg });
+    return;
+  }
+  await sleep(600);
 
   // 2. 每日签到
   const signRes = await postJson(SIGN_URL, {});
   rows.push(result("每日签到", signRes));
-  await sleep(1000);
+  console.log(`[${NAME}] 每日签到: HTTP ${signRes.status} ${messageOf(signRes.body)}`);
+  if (isAuthError(signRes)) {
+    const failMsg = "❌ 签到鉴权失败 (Token 已过期)\n💡 请在微信中重新进入小程序刷新凭据";
+    console.log(`[${NAME}] 签到凭据失效，立即停止执行`);
+    $notification.post(NAME, "登录凭据已过期", failMsg);
+    $done({ summary: failMsg });
+    return;
+  }
+  await sleep(600);
 
   // 3. 浏览任务 (三次)
   for (let i = 1; i <= 3; i++) {
     const progRes = await postJson(PROGRESS_URL, { operateType: 1 });
     rows.push(result(`浏览进度 ${i}/3`, progRes));
     console.log(`[${NAME}] 浏览上报 #${i}: HTTP ${progRes.status} ${messageOf(progRes.body)}`);
-    if (i < 3) await sleep(1200);
+    if (isAuthError(progRes)) {
+      const failMsg = "❌ 浏览上报鉴权失败 (Token 已过期)\n💡 请在微信中重新进入小程序刷新凭据";
+      console.log(`[${NAME}] 浏览上报凭据失效，立即停止执行`);
+      $notification.post(NAME, "登录凭据已过期", failMsg);
+      $done({ summary: failMsg });
+      return;
+    }
+    if (i < 3) await sleep(800);
   }
 
   // 4. 等待后端处理进度
-  await sleep(2000);
+  await sleep(1500);
 
   // 5. 任务列表查询与领取
   const listRes = await getJson(LIST_URL);
   if (listRes.error) {
     rows.push(`任务列表: 请求失败 (${listRes.error})`);
-  } else if (listRes.status === 401 || listRes.status === 403) {
+  } else if (isAuthError(listRes)) {
     rows.push("任务列表: 登录凭据失效");
   } else {
     const data = parseJSON(listRes.body);
@@ -234,7 +281,7 @@ async function main() {
           const claimRes = await claimReward(t);
           rows.push(result(`领取[${label}]`, claimRes));
           claimedCount++;
-          await sleep(1000);
+          await sleep(600);
         }
       }
       if (claimedCount === 0) {
