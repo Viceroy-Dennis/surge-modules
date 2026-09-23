@@ -168,7 +168,7 @@ const K_API = "tb_api";
 const K_COOKIE = "tb_cookie";
 const K_RESP = "tb_resp";
 
-function judge(r, rec) {
+function judge(r, apiName) {
   const j = r.json;
   const ret = String(r.ret || "");
 
@@ -178,14 +178,19 @@ function judge(r, rec) {
 
   if (/SUCCESS/.test(ret)) {
     const s = JSON.stringify(j || {});
-    // 提取当前淘金币数量
     const num = s.match(/"(?:currentCoin|totalCoin|coinCount|currentCoins|coinNum|coin)"\s*:\s*"?(\d+)/i);
     const extra = num ? ` | 🪙 当前金币: ${num[1]}` : "";
 
     if (/已签|重复|REPEAT|already|ALREADY/.test(s)) {
       return { state: "done", text: `今日已完成签到${extra}` };
     }
-    return { state: "ok", text: `${rec.api || "签到接口"} 执行成功${extra}` };
+
+    // 如果只是普通查询接口，明确告知
+    if (/balance|assets|query|info|home/i.test(apiName) && !/sign|draw|award|receive/i.test(apiName)) {
+      return { state: "ok", text: `金币资产已同步${extra}\n(尚未锁定签到动作接口，请在淘宝点一次签到按钮)` };
+    }
+
+    return { state: "ok", text: `${apiName} 执行成功${extra}` };
   }
 
   if (/FAIL_SYS_SESSION|SESSION_EXPIRED|需要登录|_bh=|未登录/i.test(ret) || /session/i.test(ret)) {
@@ -200,42 +205,59 @@ async function main() {
   let rec = {};
   try { rec = JSON.parse(rawApi || "{}"); } catch (e) {}
 
-  if (!rec.api) {
-    const msg = "未抓到淘金币签到接口！\n💡 请确保 Surge 开启模块后，在手机淘宝打开「领淘金币」点一次签到自动保存";
-    console.log(`[${NAME}] ${msg}`);
-    $notification.post(NAME, "缺少签到接口", msg);
-    $done({ summary: msg });
-    return;
+  // 1. 如果之前存了 getTimestamp 这种非业务接口，自动抹除
+  if (rec.api && /gettimestamp|getcity|unit\.get/i.test(rec.api)) {
+    console.log(`[${NAME}] 检测到垃圾时间戳接口: ${rec.api}，立即清除！`);
+    $persistentStore.write("", K_API);
+    rec = {};
   }
 
+  // 2. 检查是否有有效淘金币接口
   const cookie = $persistentStore.read(K_COOKIE) || "";
-  console.log(`[${NAME}] 开始回放: api=${rec.api}, rank=${rec.rank || 0}, cookie长度=${cookie.length}`);
-
-  const dataStr = String((rec.params && rec.params.data) || "{}");
+  let targetApi = rec.api || "";
+  let targetVer = rec.ver || "1.0";
   let payloadData = {};
-  try { payloadData = JSON.parse(dataStr); } catch (e) {}
+  try { payloadData = JSON.parse(String((rec.params && rec.params.data) || "{}")); } catch (e) {}
+
+  // 如果没有锁定有效接口，尝试使用淘金币经典候选接口探测
+  if (!targetApi || rec.rank < 2) {
+    if (!cookie.includes("_m_h5_tk")) {
+      const msg = "❌ 尚未捕获淘金币接口！\n💡 请在手机淘宝打开「领淘金币」，并手动点一下签到按钮自动抓取！";
+      console.log(`[${NAME}] ${msg}`);
+      $notification.post(NAME, "缺少淘金币接口", msg);
+      $done({ summary: msg });
+      return;
+    }
+    // 有 token 但没抓到 action，尝试候选接口
+    targetApi = "mtop.taobao.growth.aggregation.coin.signin";
+    targetVer = "1.0";
+    payloadData = { channel: "gold" };
+    console.log(`[${NAME}] 启用候选签到接口: ${targetApi}`);
+  }
+
+  console.log(`[${NAME}] 开始执行: api=${targetApi}, cookie长度=${cookie.length}`);
 
   const r = await mtopCall({
-    api: rec.api,
-    ver: rec.ver || "1.0",
+    api: targetApi,
+    ver: targetVer,
     data: payloadData,
     cookie: cookie,
-    referer: rec.params && rec.params.referer
+    referer: (rec.params && rec.params.referer) || "https://market.m.taobao.com/app/tb-source-app/tz-wk/pages/main"
   });
 
-  console.log(`[${NAME}] 回放响应: ret=${r.ret}`);
-  $persistentStore.write(JSON.stringify({ api: rec.api, ret: r.ret, body: String(r.body || "").slice(0, 2000) }), K_RESP);
+  console.log(`[${NAME}] 接口响应: ret=${r.ret}`);
+  $persistentStore.write(JSON.stringify({ api: targetApi, ret: r.ret, body: String(r.body || "").slice(0, 2000) }), K_RESP);
 
   if (r.cookie && r.cookie !== cookie) {
     $persistentStore.write(r.cookie, K_COOKIE);
   }
 
-  const j = judge(r, rec);
-  const titleMap = { ok: "签到成功", done: "今日已签过", nologin: "会话已失效", fail: "签到异常" };
-  const title = titleMap[j.state] || "签到完成";
+  const j = judge(r, targetApi);
+  const titleMap = { ok: "签到完成", done: "今日已签过", nologin: "会话已失效", fail: "签到异常" };
+  const title = titleMap[j.state] || "任务结果";
 
   console.log(`[${NAME}] 结论 -> ${title}: ${j.text}`);
-  $notification.post(NAME, title, `${j.text}\nAPI: ${rec.api}`);
+  $notification.post(NAME, title, `${j.text}\nAPI: ${targetApi}`);
   $done({ summary: j.text });
 }
 
