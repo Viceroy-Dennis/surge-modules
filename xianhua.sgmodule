@@ -5,8 +5,8 @@
 #!category=自动任务
 
 [Script]
-# 1. 登录凭据抓包 (仅凭据更新时弹通知)
-{{{capture}}} = type=http-request,pattern=^https:\/\/(api-xh|wxforum|xh|hi-gateway|api-forum-act|xianhua)\.sanguosha\.cn\/,requires-body=false,max-size=0,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/xianhua/xianhua_capture.js,script-update-interval=0
+# 1. 登录凭据抓包 (仅捕获核心 API 域名，仅新 Token 时弹通知，防刷屏防误覆盖)
+{{{capture}}} = type=http-request,pattern=^https:\/\/(api-xh|wxforum)\.sanguosha\.cn\/,requires-body=false,max-size=0,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/xianhua/xianhua_capture.js,script-update-interval=0
 
 # 2. 定时任务 (每天 09:15 自动执行)
 三国咸话自动任务 = type=cron,cronexp=15 9 * * *,timeout=90,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/xianhua/xianhua_task.js,script-update-interval=0
