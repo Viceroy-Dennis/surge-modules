@@ -1,9 +1,7 @@
 // RE0 (re0.me) 登录凭据与 Action 抓包脚本 (Surge http-request)
-// 专为越过 Cloudflare 盾墙与 Next.js Server Action 体系设计：
-// 1. 抓取与保存 Safari 真实 User-Agent（必须与 cf_clearance 严格一致，否则必定吃 CF 403 盾墙）
-// 2. 捕获并合并 cf_clearance 及全部 Session Cookie
-// 3. 捕获真实签到 POST 请求头（next-action、next-router-state-tree、body）
-// 4. 极致降噪：非签到动作只静默合并 Cookie，绝不刷屏打扰
+// 1. 保存真实 User-Agent 与 cf_clearance 通行证
+// 2. 捕获真实签到 POST 请求 (Next-Action, Next-Router-State-Tree, Body)
+// 3. 严格防回环：过滤自身脚本发起的请求 (X-Surge-Task)，避免自发自抓
 
 const NAME = "RE0抓包";
 const K_COOKIE = "re0_cookie";
@@ -48,58 +46,68 @@ try {
   if (typeof $request === "undefined") {
     $done({});
   } else {
-    const url = String($request.url || "");
-    const method = String($request.method || "GET").toUpperCase();
-
-    // 过滤静态资源与 Next.js chunks，只关注页面与接口
-    if (/\.(png|jpg|jpeg|gif|webp|svg|css|ico|woff2?)$/i.test(url) || url.includes("/_next/static/")) {
+    const h = lowerHeaders($request.headers || {});
+    // 防回环：如果是脚本自己发出的请求，直接跳过
+    if (h["x-surge-task"]) {
       $done({});
     } else {
-      const h = lowerHeaders($request.headers || {});
-      const cookie = String(h.cookie || "");
-      const ua = String(h["user-agent"] || "");
+      const url = String($request.url || "");
+      const method = String($request.method || "GET").toUpperCase();
 
-      // 1. 持续合并与更新 Cookie (包含最重要的 cf_clearance 和 hdh_sa_token)
-      if (cookie) {
-        const oldCookie = $persistentStore.read(K_COOKIE) || "";
-        const merged = mergeCookie(oldCookie, cookie);
-        if (merged && merged !== oldCookie) {
-          $persistentStore.write(merged, K_COOKIE);
-          $persistentStore.write(String(Date.now()), K_TS);
+      if (/\.(png|jpg|jpeg|gif|webp|svg|css|ico|woff2?)$/i.test(url) || url.includes("/_next/static/")) {
+        $done({});
+      } else {
+        const cookie = String(h.cookie || "");
+        const ua = String(h["user-agent"] || "");
+
+        // 1. 持续合并 Cookie (确保 cf_clearance 和 hdh_sa_token 始终最新)
+        if (cookie) {
+          const oldCookie = $persistentStore.read(K_COOKIE) || "";
+          const merged = mergeCookie(oldCookie, cookie);
+          if (merged && merged !== oldCookie) {
+            $persistentStore.write(merged, K_COOKIE);
+            $persistentStore.write(String(Date.now()), K_TS);
+          }
         }
+
+        // 2. 锁定真实 Safari UA
+        if (ua && ua.includes("Mozilla")) {
+          $persistentStore.write(ua, K_UA);
+        }
+
+        // 3. 捕获真实签到 POST
+        const isAction = Boolean(h["next-action"] || (method === "POST" && /checkin|sign/i.test(url)));
+        if (method === "POST" && isAction) {
+          const body = String($request.body || "[false]");
+          const cleanHdr = {};
+          Object.keys(h).forEach((k) => {
+            if (!HOP[k] && h[k] !== "") cleanHdr[k] = String(h[k]);
+          });
+
+          const actId = String(h["next-action"] || "");
+          const oldAct = $persistentStore.read(K_ACT) || "";
+
+          $persistentStore.write(JSON.stringify(cleanHdr), K_HDR);
+          $persistentStore.write(url, K_URL);
+          $persistentStore.write(body, K_BODY);
+          if (actId) $persistentStore.write(actId, K_ACT);
+          $persistentStore.write(String(Date.now()), K_TS);
+
+          const hasCf = Boolean(cookieMap(cookie).cf_clearance);
+          console.log(`[${NAME}] 捕获到 Action POST: act=${actId.slice(0, 10)}... body=${body}`);
+
+          // 仅在 Action ID 变化或初次捕获时发通知，避免重复刷屏
+          if (actId !== oldAct) {
+            $notification.post(
+              NAME,
+              "签到请求与盾墙凭据已捕获",
+              `Action ID: ${actId.slice(0, 8)}...\nCF 凭据: ${hasCf ? "✅ 已具备 (cf_clearance)" : "⚠️ 未检测到 cf_clearance"}`
+            );
+          }
+        }
+
+        $done({});
       }
-
-      // 2. 保存 Safari 的真实 User-Agent (这是过 CF 盾墙的生命线)
-      if (ua && ua.includes("Mozilla")) {
-        $persistentStore.write(ua, K_UA);
-      }
-
-      // 3. 捕获用户在页面上点击的真实签到 Server Action POST 请求
-      const isAction = Boolean(h["next-action"] || (method === "POST" && /checkin|sign/i.test(url)));
-      if (method === "POST" && isAction) {
-        const body = String($request.body || "[false]");
-        const cleanHdr = {};
-        Object.keys(h).forEach((k) => {
-          if (!HOP[k] && h[k] !== "") cleanHdr[k] = String(h[k]);
-        });
-
-        const actId = String(h["next-action"] || "");
-        $persistentStore.write(JSON.stringify(cleanHdr), K_HDR);
-        $persistentStore.write(url, K_URL);
-        $persistentStore.write(body, K_BODY);
-        if (actId) $persistentStore.write(actId, K_ACT);
-        $persistentStore.write(String(Date.now()), K_TS);
-
-        const hasCf = Boolean(cookieMap(cookie).cf_clearance);
-        console.log(`[${NAME}] 成功捕获签到 POST! action=${actId.slice(0, 10)}... body=${body} has_cf=${hasCf}`);
-        $notification.post(
-          NAME,
-          "签到请求与盾墙凭证已捕获",
-          `Action ID: ${actId ? actId.slice(0, 8) + "..." : "已锁定"}\nCF 凭据: ${hasCf ? "✅ 已具备 (cf_clearance)" : "⚠️ 未包含 cf_clearance"}`
-        );
-      }
-
-      $done({});
     }
   }
 } catch (e) {
