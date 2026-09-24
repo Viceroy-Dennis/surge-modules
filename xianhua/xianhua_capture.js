@@ -1,6 +1,11 @@
 // 三国咸话登录凭据与领奖接口抓包脚本 (Surge http-request)
-// 1. 捕获双通道凭据 (wxforum 签到通道 + api-xh 社区/任务通道)
-// 2. 核心侦听：监听用户在小程序内点击「领取」的真实请求，自动捕获真实领奖 URL 与参数结构！
+// 核心机制：
+// 1. 严格隔离双通道 Token：
+//    - wxforum (签到通道): 存入 sgxh_wx_headers / sgxh_wx_token (HS256 算法)
+//    - api-xh (社区/浏览/任务通道): 存入 sgxh_xh_headers / sgxh_xh_token (RS256 算法)
+//    - 绝不允许 wxforum 的 HS256 Token 覆盖 api-xh 的社区 Token！
+// 2. 真实领奖动作侦听：
+//    - 监听用户在小程序内点击「领取」的 POST 请求，一旦触发立即锁定真实领奖 URL！
 
 const NAME = "三国咸话";
 const HEADER_KEY = "sgxh_headers";
@@ -37,6 +42,10 @@ function pickToken(h) {
   return String(tok || "").trim();
 }
 
+function isHs256Jwt(tok) {
+  return String(tok || "").includes("eyJhbGciOiJIUzI1Ni");
+}
+
 try {
   if (typeof $request === "undefined") {
     $done({});
@@ -58,7 +67,7 @@ try {
         $notification.post(
           NAME,
           "🎯 真实领奖接口已锁定！",
-          `接口: ${url.replace(/^https?:\/\/[^/]+/i, "")}\n参数: ${bodyStr.slice(0, 100)}\n后续将全自动调用此接口领奖！`
+          `接口: ${url.replace(/^https?:\/\/[^/]+/i, "")}\n参数: ${bodyStr.slice(0, 100)}\n后续自动调用此接口领奖！`
         );
       }
     }
@@ -71,34 +80,36 @@ try {
         if (!DROP[k] && h[k] !== "") saved[k] = h[k];
       });
 
-      // 通用保存
-      $persistentStore.write(tok, TOKEN_KEY);
-      $persistentStore.write(JSON.stringify(saved), HEADER_KEY);
-      $persistentStore.write(String(Date.now()), TIME_KEY);
-
       const isXh = host.includes("api-xh") || host.includes("xh.sanguosha.cn") || host.includes("api-forum-act");
       const isWx = host.includes("wxforum");
+      const isHs256 = isHs256Jwt(tok);
 
-      if (isXh) {
+      // 分流隔离保存
+      if (isXh && !isHs256) {
         $persistentStore.write(tok, XH_TOK_KEY);
         $persistentStore.write(JSON.stringify(saved), XH_HDR_KEY);
-      }
-      if (isWx) {
+        $persistentStore.write(tok, TOKEN_KEY);
+        $persistentStore.write(JSON.stringify(saved), HEADER_KEY);
+        $persistentStore.write(String(Date.now()), TIME_KEY);
+        console.log(`[${NAME}] 🎯 成功捕获【社区/浏览/任务 api-xh】专属凭据！(长 ${tok.length} 位)`);
+      } else if (isWx) {
         $persistentStore.write(tok, WX_TOK_KEY);
         $persistentStore.write(JSON.stringify(saved), WX_HDR_KEY);
+        $persistentStore.write(String(Date.now()), TIME_KEY);
+        console.log(`[${NAME}] 成功捕获【签到 wxforum】凭据 (长 ${tok.length} 位, HS256=${isHs256})`);
       }
 
-      // 节流通知
+      // 节流通知 (5秒)
       const lastNotify = Number($persistentStore.read(NOTIFY_KEY) || 0);
       const isThrottled = (Date.now() - lastNotify < 5000);
 
       if (!isThrottled) {
         $persistentStore.write(String(Date.now()), NOTIFY_KEY);
-        const channelName = isXh ? "社区/任务核心凭据 (api-xh)" : isWx ? "签到凭据 (wxforum)" : `通道 (${host})`;
+        const channelName = isXh ? "社区/浏览/任务凭据 (api-xh) 🎯" : "签到凭据 (wxforum)";
         $notification.post(
           NAME,
           "凭据已捕获 ✅",
-          `成功捕获: ${channelName}\nToken 长度: ${tok.length} 位`
+          `通道: ${channelName}\nToken 长度: ${tok.length} 位\n(${host})`
         );
       }
 
