@@ -40,12 +40,14 @@ function savedHeaders() {
   if (cookie) h.cookie = cookie;
   const token = $persistentStore.read(TOKEN_KEY);
   if (token) {
-    if (!h.authorization && !h.token && !h["x-token"] && !h["x-auth-token"]) {
-      h.authorization = token;
-    }
+    const bTok = token.startsWith("Bearer ") ? token : `Bearer ${token}`;
+    const bareTok = token.replace(/^Bearer\s+/i, "");
+    h.authorization = bTok;
+    h.token = bareTok;
+    h["x-token"] = bareTok;
     const ck = cookieMap(h.cookie || "");
     if (!ck.token) {
-      h.cookie = h.cookie ? h.cookie + "; token=" + token : "token=" + token;
+      h.cookie = h.cookie ? h.cookie + "; token=" + bareTok : "token=" + bareTok;
     }
   }
   return h;
