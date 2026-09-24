@@ -1,12 +1,14 @@
 // 三国咸话登录凭据抓包脚本 (Surge http-request)
-// 核心原则：
-// 1. 严格过滤：必须包含真实有效的用户 Token (长度>=8) 才保存，杜绝空头或追踪 Cookie 冲掉凭据
-// 2. 极致降噪：Token 相同绝不重复弹窗，进小程序并发几十个请求也只弹 1 次通知！
+// 核心优化：
+// 1. 全域支持：覆盖 api-xh, wxforum, xh, hi-gateway, api-forum-act, xianhua 全线域名
+// 2. 智能节流 (8秒)：每次打开小程序确保【恰好弹1次】捕获确认通知，绝不刷屏二十几个弹窗，也绝不无声无息！
+// 3. 自动规整 Token：去除首尾空格，确保持久化写入 sgxh_token / sgxh_headers
 
 const NAME = "三国咸话";
 const TOKEN_KEY = "sgxh_token";
 const HEADER_KEY = "sgxh_headers";
 const TIME_KEY = "sgxh_capture_time";
+const NOTIFY_KEY = "sgxh_last_notify";
 
 const DROP = { host: 1, connection: 1, "content-length": 1, "content-encoding": 1, "accept-encoding": 1, "transfer-encoding": 1, "proxy-connection": 1 };
 
@@ -36,35 +38,42 @@ try {
   if (typeof $request === "undefined") {
     $done({});
   } else {
-    const url = $request.url || "";
+    const url = String($request.url || "");
+    const host = (url.match(/^https?:\/\/([^/]+)/i) || ["", ""])[1].toLowerCase();
     const raw = $request.headers || {};
     const h = lowerHeaders(raw);
     const tok = pickToken(h);
 
-    // 只有拿到真正的有效 Token (且长度合理) 才处理，避免无 token 请求污染
     if (!tok || tok.length < 8) {
       $done({});
     } else {
       const oldTok = $persistentStore.read(TOKEN_KEY) || "";
       const isNew = (tok !== oldTok);
 
-      // 只保留安全有效的头部
       const saved = {};
       Object.keys(h).forEach((k) => {
         if (!DROP[k] && h[k] !== "") saved[k] = h[k];
       });
 
-      // 无论新旧，保持头部最新可用
+      // 无论新旧，持续将最新请求头与 Token 写入存储
       $persistentStore.write(tok, TOKEN_KEY);
       $persistentStore.write(JSON.stringify(saved), HEADER_KEY);
       $persistentStore.write(String(Date.now()), TIME_KEY);
 
-      // 降噪核心：只有捕获到全新 Token 时才弹窗，相同 Token 只记录 console.log！
-      if (isNew) {
-        console.log(`[${NAME}] 捕获到新 Token: ${tok.slice(0, 10)}... (长 ${tok.length})`);
-        $notification.post(NAME, "登录凭据已更新", `成功捕获最新 Token！\n长约 ${tok.length} 位`);
+      // 节流通知：8 秒内最多弹 1 次通知，既不轰炸刷屏，又确保能看到捕获成功的反馈！
+      const lastNotify = Number($persistentStore.read(NOTIFY_KEY) || 0);
+      const isThrottled = (Date.now() - lastNotify < 8000);
+
+      if (!isThrottled) {
+        $persistentStore.write(String(Date.now()), NOTIFY_KEY);
+        console.log(`[${NAME}] 成功捕获 Token: ${tok.slice(0, 10)}... (长 ${tok.length})`);
+        $notification.post(
+          NAME,
+          "登录凭据已更新 ✅",
+          `域名: ${host}\nToken: ${tok.slice(0, 8)}... (${isNew ? "全新凭据" : "已重新核验"})\n可随时在 Surge 运行每日任务！`
+        );
       } else {
-        console.log(`[${NAME}] Token 依然有效，静默更新请求头`);
+        console.log(`[${NAME}] 并发请求静默存盘`);
       }
 
       $done({});
