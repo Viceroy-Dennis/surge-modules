@@ -86,6 +86,11 @@ async function main() {
     const j = parseJSON(res.body);
     const tasks = (j && j.data) || [];
     rows.push(`  • 识别任务数: ${tasks.length} 项`);
+    const browseTask = tasks.find(t => String(t.taskDesc || t.taskName || "").includes("浏览") && String(t.taskDesc || t.taskName || "").includes("3")) || tasks[0];
+    if (browseTask) {
+      console.log(`[${NAME}] 浏览任务详情: ${JSON.stringify(browseTask)}`);
+      rows.push(`  • 浏览任务原始结构: ${JSON.stringify(browseTask).slice(0, 300)}`);
+    }
   } else if (res.status === 401 || (res.body && res.body.includes("token已经过期"))) {
     rows.push(`  • 接口状态: 🔴 401 凭据缺失或已过期`);
     rows.push(`  • 💡 解决办法: 请在小程序里随便点进一个【帖子】或点击【社区】页面，即可自动抓取 api-xh 凭据！`);
