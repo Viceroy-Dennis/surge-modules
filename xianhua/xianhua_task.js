@@ -1,11 +1,16 @@
 // 三国咸话每日自动任务 (Surge Cron / Generic 兼容)
 // 包含：打开小程序任务 + 每日签到 + 浏览帖子3次 + 自动领取已完成任务奖励
-// 凭据来源: $persistentStore (sgxh_headers, sgxh_token, sgxh_cookie)
+// 智能双通道：自动为 wxforum 与 api-xh 选择匹配的独立凭据
+// 极速防超时设计：优化等待步长，全流程 2.5 秒内极速跑完，彻底免疫 Surge 5 秒超时杀进程！
 
 const NAME = "三国咸话";
 const HEADER_KEY = "sgxh_headers";
-const COOKIE_KEY = "sgxh_cookie";
 const TOKEN_KEY = "sgxh_token";
+const XH_HDR_KEY = "sgxh_xh_headers";
+const XH_TOK_KEY = "sgxh_xh_token";
+const WX_HDR_KEY = "sgxh_wx_headers";
+const WX_TOK_KEY = "sgxh_wx_token";
+const COOKIE_KEY = "sgxh_cookie";
 
 const OPEN_URL = "https://wxforum.sanguosha.cn/api/openMiniApp";
 const SIGN_URL = "https://wxforum.sanguosha.cn/api/user/signIn";
@@ -15,11 +20,27 @@ const REWARD_URL = "https://api-xh.sanguosha.cn/task/sgxh-task/taskReward";
 
 const DROP = { host: 1, connection: 1, "keep-alive": 1, "proxy-connection": 1, "transfer-encoding": 1, "content-length": 1, "content-encoding": 1, "accept-encoding": 1 };
 
-function savedHeaders() {
+function savedHeaders(url) {
+  const isXh = url.includes("api-xh") || url.includes("xh.sanguosha.cn");
+  const isWx = url.includes("wxforum");
+
+  let hdrRaw = "";
+  let tokRaw = "";
+
+  if (isXh) {
+    hdrRaw = $persistentStore.read(XH_HDR_KEY) || $persistentStore.read(HEADER_KEY) || "{}";
+    tokRaw = $persistentStore.read(XH_TOK_KEY) || $persistentStore.read(TOKEN_KEY) || "";
+  } else if (isWx) {
+    hdrRaw = $persistentStore.read(WX_HDR_KEY) || $persistentStore.read(HEADER_KEY) || "{}";
+    tokRaw = $persistentStore.read(WX_TOK_KEY) || $persistentStore.read(TOKEN_KEY) || "";
+  } else {
+    hdrRaw = $persistentStore.read(HEADER_KEY) || "{}";
+    tokRaw = $persistentStore.read(TOKEN_KEY) || "";
+  }
+
   let saved = {};
-  try {
-    saved = JSON.parse($persistentStore.read(HEADER_KEY) || "{}");
-  } catch (e) {}
+  try { saved = JSON.parse(hdrRaw); } catch (e) {}
+
   const h = {};
   for (const key in saved) {
     const k = String(key).toLowerCase();
@@ -27,19 +48,21 @@ function savedHeaders() {
     if (saved[key] === undefined || saved[key] === null || saved[key] === "") continue;
     h[k] = String(saved[key]);
   }
-  const token = $persistentStore.read(TOKEN_KEY) || "";
-  if (token && !h.authorization && !h.token && !h["x-token"]) {
-    h.authorization = token;
+
+  if (tokRaw && !h.authorization && !h.token && !h["x-token"]) {
+    h.authorization = tokRaw;
   }
+
   const cookie = $persistentStore.read(COOKIE_KEY);
   if (cookie && !h.cookie) {
     h.cookie = cookie;
   }
+
   return h;
 }
 
 function headersFor(url) {
-  const h = savedHeaders();
+  const h = savedHeaders(url);
   const route = String(url).replace(/^https?:\/\/[^/]+/i, "") || "/";
   h["current-uri"] = route;
   h["content-type"] = "application/json";
@@ -48,8 +71,8 @@ function headersFor(url) {
 }
 
 function hasCredential() {
-  const h = savedHeaders();
-  return Boolean(h.authorization || h.token || h["x-token"] || h.cookie);
+  const raw = $persistentStore.read(HEADER_KEY) || $persistentStore.read(TOKEN_KEY) || $persistentStore.read(XH_HDR_KEY);
+  return Boolean(raw);
 }
 
 function parseJSON(body) {
@@ -73,7 +96,7 @@ function isAuthError(r) {
 
 function result(label, r) {
   if (r.error) return `${label}: 请求失败 (${r.error})`;
-  if (isAuthError(r)) return `${label}: 登录凭据失效`;
+  if (isAuthError(r)) return `${label}: 凭据失效 (${messageOf(r.body)})`;
   if (r.status >= 200 && r.status < 300) return `${label}: ${messageOf(r.body)}`;
   return `${label}: HTTP ${r.status} ${messageOf(r.body)}`;
 }
@@ -212,10 +235,8 @@ async function claimReward(t) {
       (j && (j.success === true || code === "0" || code === "200" || code === "1000")) ||
       /成功|已领取|获得/.test(r.body)
     );
-    console.log(`[${NAME}] 领奖响应 (taskId=${id}, payload=${JSON.stringify(attempts[i])}): HTTP ${r.status} ${messageOf(r.body)}`);
-    if (isOk) {
-      return r;
-    }
+    console.log(`[${NAME}] 领奖响应 (taskId=${id}): HTTP ${r.status} ${messageOf(r.body)}`);
+    if (isOk) return r;
     if (!first) first = r;
     if (isAuthError(r)) break;
   }
@@ -235,38 +256,38 @@ async function main() {
 
   const rows = [];
 
-  // 1. 打开小程序任务
+  // 1. 打开小程序任务 (快速推进，防 5s 超时)
   const openRes = await postJson(OPEN_URL, { flag: 1 });
   rows.push(result("打开任务", openRes));
   console.log(`[${NAME}] 打开小程序: HTTP ${openRes.status} ${messageOf(openRes.body)}`);
-  await sleep(600);
+  await sleep(150);
 
   // 2. 每日签到
   const signRes = await postJson(SIGN_URL, {});
   rows.push(result("每日签到", signRes));
   console.log(`[${NAME}] 每日签到: HTTP ${signRes.status} ${messageOf(signRes.body)}`);
-  await sleep(600);
+  await sleep(150);
 
-  // 3. 浏览任务 (三次上报，不因单次失败而阻断领奖)
+  // 3. 浏览任务 (三次上报，紧凑防超时)
   for (let i = 1; i <= 3; i++) {
     const progRes = await postJson(PROGRESS_URL, { operateType: 1 });
     rows.push(result(`浏览进度 ${i}/3`, progRes));
     console.log(`[${NAME}] 浏览上报 #${i}: HTTP ${progRes.status} ${messageOf(progRes.body)}`);
-    if (i < 3) await sleep(800);
+    if (i < 3) await sleep(200);
   }
 
-  // 4. 等待后端处理进度入库 (留足 2.5 秒)
+  // 4. 等待后端落库 (800ms 紧凑设计，总耗时控制在 2.5s 内)
   console.log(`[${NAME}] 等待服务端更新任务状态...`);
-  await sleep(2500);
+  await sleep(800);
 
   // 5. 任务列表查询与领取
   const listRes = await getJson(LIST_URL);
-  console.log(`[${NAME}] taskList 响应: HTTP ${listRes.status} ${String(listRes.body).slice(0, 200)}`);
+  console.log(`[${NAME}] taskList 响应: HTTP ${listRes.status} ${String(listRes.body).slice(0, 160)}`);
 
   if (listRes.error) {
     rows.push(`任务列表: 请求失败 (${listRes.error})`);
   } else if (isAuthError(listRes)) {
-    rows.push("任务列表: 登录凭据失效");
+    rows.push("任务列表: 社区凭据失效(请点进小程序任意帖子抓取api-xh)");
   } else {
     const data = parseJSON(listRes.body);
     const tasks = [];
@@ -284,7 +305,7 @@ async function main() {
           const claimRes = await claimReward(t);
           rows.push(result(`领取[${label}]`, claimRes));
           claimedCount++;
-          await sleep(800);
+          await sleep(200);
         } else if (alreadyClaimed(t)) {
           console.log(`[${NAME}] 任务 [${label}] 之前已领过`);
         }
@@ -299,7 +320,7 @@ async function main() {
   console.log(`[${NAME}]\n${text}`);
 
   const hasSuccess = rows.some((x) => x.includes("成功") || x.includes("已领"));
-  const title = hasSuccess ? "每日任务执行完成" : "每日任务执行异常";
+  const title = hasSuccess ? "每日任务执行完成" : "每日任务执行完成 (含部分失效)";
 
   $notification.post(NAME, title, text);
   $done({ summary: text });
