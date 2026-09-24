@@ -15,57 +15,41 @@ const REWARD_URL = "https://api-xh.sanguosha.cn/task/sgxh-task/taskReward";
 
 const DROP = { host: 1, connection: 1, "keep-alive": 1, "proxy-connection": 1, "transfer-encoding": 1, "content-length": 1, "content-encoding": 1, "accept-encoding": 1 };
 
-function cookieMap(cookie) {
-  const o = {};
-  String(cookie || "").split(";").forEach((p) => {
-    const i = p.indexOf("=");
-    if (i > 0) o[p.slice(0, i).trim()] = p.slice(i + 1).trim();
-  });
-  return o;
-}
-
 function savedHeaders() {
   let saved = {};
   try {
     saved = JSON.parse($persistentStore.read(HEADER_KEY) || "{}");
   } catch (e) {}
   const h = {};
-  Object.keys(saved).forEach((key) => {
+  for (const key in saved) {
     const k = String(key).toLowerCase();
-    if (!DROP[k] && saved[key] !== undefined && saved[key] !== null && saved[key] !== "") {
-      h[k] = String(saved[key]);
-    }
-  });
+    if (DROP[k]) continue;
+    if (saved[key] === undefined || saved[key] === null || saved[key] === "") continue;
+    h[k] = String(saved[key]);
+  }
+  const token = $persistentStore.read(TOKEN_KEY) || "";
+  if (token && !h.authorization && !h.token && !h["x-token"]) {
+    h.authorization = token;
+  }
   const cookie = $persistentStore.read(COOKIE_KEY);
-  if (cookie) h.cookie = cookie;
-  const token = $persistentStore.read(TOKEN_KEY);
-  if (token) {
-    const bTok = token.startsWith("Bearer ") ? token : `Bearer ${token}`;
-    const bareTok = token.replace(/^Bearer\s+/i, "");
-    h.authorization = bTok;
-    h.token = bareTok;
-    h["x-token"] = bareTok;
-    const ck = cookieMap(h.cookie || "");
-    if (!ck.token) {
-      h.cookie = h.cookie ? h.cookie + "; token=" + bareTok : "token=" + bareTok;
-    }
+  if (cookie && !h.cookie) {
+    h.cookie = cookie;
   }
   return h;
 }
 
 function headersFor(url) {
   const h = savedHeaders();
-  h["current-uri"] = String(url).replace(/^https?:\/\/[^/]+/i, "") || "/";
+  const route = String(url).replace(/^https?:\/\/[^/]+/i, "") || "/";
+  h["current-uri"] = route;
   h["content-type"] = "application/json";
   h.accept = h.accept || "application/json, text/plain, */*";
-  h.origin = h.origin || "https://xianhua.sanguosha.cn";
-  h.referer = h.referer || "https://xianhua.sanguosha.cn/";
   return h;
 }
 
 function hasCredential() {
   const h = savedHeaders();
-  return Boolean(h.authorization || h.token || h["x-token"] || h["x-auth-token"] || h.cookie);
+  return Boolean(h.authorization || h.token || h["x-token"] || h.cookie);
 }
 
 function parseJSON(body) {
@@ -198,15 +182,15 @@ function isSignTask(t) {
 function claimable(t) {
   if (alreadyClaimed(t)) return false;
 
-  // 1. 浏览与签到任务：刚在主流程执行完毕，必定已达成，直接发起领取！
+  // 1. 浏览与签到任务：刚在主流程执行过，必定达成，直接直领！
   if (isBrowseTask(t)) return true;
   if (isSignTask(t)) return true;
 
-  // 2. 状态值明确指示已完成待领 (1 或 2 表示待领)
+  // 2. 状态值明确指示已完成待领
   const s = pick(t, ["progressStatus", "status", "taskStatus", "state"]);
   if (s && (s.value === 1 || s.value === "1" || s.value === 2 || s.value === "2")) return true;
 
-  // 3. 进度数值比对 (兼容各种字段名)
+  // 3. 进度数值比对
   const curItem = pick(t, ["currentProgressValue", "progress", "currentProgress", "finishNum", "completeNum", "finishCount", "count", "current"]);
   const maxItem = pick(t, ["targetProgressValue", "targetNum", "totalNum", "maxNum", "needNum", "targetCount", "target", "need", "maxCount"]);
   const cur = Number(curItem ? curItem.value : NaN);
@@ -251,48 +235,27 @@ async function main() {
 
   const rows = [];
 
-  // 1. 打开小程序
+  // 1. 打开小程序任务
   const openRes = await postJson(OPEN_URL, { flag: 1 });
   rows.push(result("打开任务", openRes));
   console.log(`[${NAME}] 打开小程序: HTTP ${openRes.status} ${messageOf(openRes.body)}`);
-  if (isAuthError(openRes)) {
-    const failMsg = "❌ Token 已过期 (401)\n💡 请在微信中重新进入「三国咸话」小程序刷新凭据后再运行";
-    console.log(`[${NAME}] 登录凭据失效，立即停止执行`);
-    $notification.post(NAME, "登录凭据已过期", failMsg);
-    $done({ summary: failMsg });
-    return;
-  }
   await sleep(600);
 
   // 2. 每日签到
   const signRes = await postJson(SIGN_URL, {});
   rows.push(result("每日签到", signRes));
   console.log(`[${NAME}] 每日签到: HTTP ${signRes.status} ${messageOf(signRes.body)}`);
-  if (isAuthError(signRes)) {
-    const failMsg = "❌ 签到鉴权失败 (Token 已过期)\n💡 请在微信中重新进入小程序刷新凭据";
-    console.log(`[${NAME}] 签到凭据失效，立即停止执行`);
-    $notification.post(NAME, "登录凭据已过期", failMsg);
-    $done({ summary: failMsg });
-    return;
-  }
   await sleep(600);
 
-  // 3. 浏览任务 (三次)
+  // 3. 浏览任务 (三次上报，不因单次失败而阻断领奖)
   for (let i = 1; i <= 3; i++) {
     const progRes = await postJson(PROGRESS_URL, { operateType: 1 });
     rows.push(result(`浏览进度 ${i}/3`, progRes));
     console.log(`[${NAME}] 浏览上报 #${i}: HTTP ${progRes.status} ${messageOf(progRes.body)}`);
-    if (isAuthError(progRes)) {
-      const failMsg = "❌ 浏览上报鉴权失败 (Token 已过期)\n💡 请在微信中重新进入小程序刷新凭据";
-      console.log(`[${NAME}] 浏览上报凭据失效，立即停止执行`);
-      $notification.post(NAME, "登录凭据已过期", failMsg);
-      $done({ summary: failMsg });
-      return;
-    }
-    if (i < 3) await sleep(1000);
+    if (i < 3) await sleep(800);
   }
 
-  // 4. 等待后端处理进度入库 (服务端异步写入需要时间，留足 2.5 秒)
+  // 4. 等待后端处理进度入库 (留足 2.5 秒)
   console.log(`[${NAME}] 等待服务端更新任务状态...`);
   await sleep(2500);
 
@@ -324,8 +287,6 @@ async function main() {
           await sleep(800);
         } else if (alreadyClaimed(t)) {
           console.log(`[${NAME}] 任务 [${label}] 之前已领过`);
-        } else {
-          console.log(`[${NAME}] 任务 [${label}] 未达成或非目标`);
         }
       }
       if (claimedCount === 0) {
@@ -337,12 +298,10 @@ async function main() {
   const text = rows.join("\n");
   console.log(`[${NAME}]\n${text}`);
 
-  if (rows.some((x) => x.indexOf("凭据失效") >= 0)) {
-    $notification.post(NAME, "登录凭据已过期", text);
-  } else {
-    $notification.post(NAME, "每日任务完成", text);
-  }
+  const hasSuccess = rows.some((x) => x.includes("成功") || x.includes("已领"));
+  const title = hasSuccess ? "每日任务执行完成" : "每日任务执行异常";
 
+  $notification.post(NAME, title, text);
   $done({ summary: text });
 }
 
