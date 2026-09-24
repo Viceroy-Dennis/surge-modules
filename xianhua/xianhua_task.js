@@ -133,9 +133,9 @@ function getJson(url) {
   });
 }
 
-const ID_FIELDS = ["taskId", "taskID", "task_id", "id", "taskCode"];
-const RECEIVED_FIELDS = ["isReceive", "isReceived", "received", "hasReceive", "hasReceived", "isGetReward", "isGet", "receiveFlag", "rewardFlag"];
-const NAME_FIELDS = ["taskDesc", "taskName", "task_name", "name", "title"];
+const ID_FIELDS = ["taskId", "taskID", "task_id", "id", "userTaskId", "userTaskID", "taskCode"];
+const RECEIVED_FIELDS = ["isReceive", "isReceived", "received", "hasReceive", "hasReceived", "isGetReward", "isGet", "receiveFlag", "rewardFlag", "claimed"];
+const NAME_FIELDS = ["taskName", "name", "title", "taskTitle", "taskDesc", "task_name", "description"];
 
 function pick(obj, fields) {
   for (let i = 0; i < fields.length; i++) {
@@ -147,17 +147,22 @@ function pick(obj, fields) {
 
 function truthy(v) { return v === true || v === 1 || v === "1" || v === "true"; }
 
-function collectTasks(node, out) {
+function collectTasks(node, out, seen = {}) {
   if (!node || typeof node !== "object") return;
   if (Array.isArray(node)) {
-    node.forEach((item) => collectTasks(item, out));
+    node.forEach((item) => collectTasks(item, out, seen));
     return;
   }
-  if (pick(node, ID_FIELDS) && (pick(node, ["progressStatus", "status", "taskStatus"]) || pick(node, RECEIVED_FIELDS) || pick(node, ["currentProgressValue", "targetProgressValue"]))) {
-    out.push(node);
-    return;
+  const id = pick(node, ID_FIELDS);
+  const name = pick(node, NAME_FIELDS);
+  if (id && (name || pick(node, ["status", "progressStatus", "taskStatus"]) || pick(node, RECEIVED_FIELDS))) {
+    const key = String(id.value);
+    if (!seen[key]) {
+      seen[key] = 1;
+      out.push(node);
+    }
   }
-  Object.keys(node).forEach((k) => collectTasks(node[k], out));
+  Object.keys(node).forEach((k) => collectTasks(node[k], out, seen));
 }
 
 function taskIdOf(t) {
@@ -172,28 +177,57 @@ function taskLabel(t) {
 
 function alreadyClaimed(t) {
   const r = pick(t, RECEIVED_FIELDS);
-  return Boolean(r && truthy(r.value));
+  if (r && truthy(r.value)) return true;
+  const s = pick(t, ["receiveStatus", "userTaskStatus"]);
+  if (s && (s.value === 1 || s.value === "1" || s.value === 2 || s.value === "2")) return true;
+  return false;
+}
+
+function isBrowseTask(t) {
+  const label = taskLabel(t);
+  return /浏览|阅读|看帖/.test(label);
+}
+
+function isSignTask(t) {
+  const label = taskLabel(t);
+  return /签到|打开|登录|登陆|小程序/.test(label) && !/发表|发帖|评论/.test(label);
 }
 
 function claimable(t) {
   if (alreadyClaimed(t)) return false;
-  const s = pick(t, ["progressStatus"]);
-  if (s && (s.value === 2 || s.value === "2")) return true;
-  const curItem = pick(t, ["currentProgressValue", "progress", "currentProgress", "finishNum", "completeNum"]);
-  const maxItem = pick(t, ["targetProgressValue", "targetNum", "totalNum", "maxNum", "needNum"]);
+
+  // 1. 浏览与签到任务：刚在主流程执行完毕，必定已达成，直接发起领取！
+  if (isBrowseTask(t)) return true;
+  if (isSignTask(t)) return true;
+
+  // 2. 状态值明确指示已完成待领 (1 或 2 表示待领)
+  const s = pick(t, ["progressStatus", "status", "taskStatus", "state"]);
+  if (s && (s.value === 1 || s.value === "1" || s.value === 2 || s.value === "2")) return true;
+
+  // 3. 进度数值比对 (兼容各种字段名)
+  const curItem = pick(t, ["currentProgressValue", "progress", "currentProgress", "finishNum", "completeNum", "finishCount", "count", "current"]);
+  const maxItem = pick(t, ["targetProgressValue", "targetNum", "totalNum", "maxNum", "needNum", "targetCount", "target", "need", "maxCount"]);
   const cur = Number(curItem ? curItem.value : NaN);
   const max = Number(maxItem ? maxItem.value : NaN);
-  return isFinite(cur) && isFinite(max) && max > 0 && cur >= max;
+  if (isFinite(cur) && isFinite(max) && max > 0 && cur >= max) return true;
+
+  return false;
 }
 
 async function claimReward(t) {
   const id = taskIdOf(t);
-  const attempts = [{ taskId: id }, { id: id }, { taskCode: id }];
+  const attempts = [{ taskId: id }, { taskId: Number(id) }, { id: id }, { taskCode: id }];
   let first = null;
   for (let i = 0; i < attempts.length; i++) {
     const r = await postJson(REWARD_URL, attempts[i]);
     const j = parseJSON(r.body);
-    if (r.status >= 200 && r.status < 300 && j && (j.success === true || j.code === 0 || j.code === 200)) {
+    const code = j ? (j.code !== undefined ? String(j.code) : "") : "";
+    const isOk = r.status >= 200 && r.status < 300 && (
+      (j && (j.success === true || code === "0" || code === "200" || code === "1000")) ||
+      /成功|已领取|获得/.test(r.body)
+    );
+    console.log(`[${NAME}] 领奖响应 (taskId=${id}, payload=${JSON.stringify(attempts[i])}): HTTP ${r.status} ${messageOf(r.body)}`);
+    if (isOk) {
       return r;
     }
     if (!first) first = r;
@@ -253,14 +287,17 @@ async function main() {
       $done({ summary: failMsg });
       return;
     }
-    if (i < 3) await sleep(800);
+    if (i < 3) await sleep(1000);
   }
 
-  // 4. 等待后端处理进度
-  await sleep(1500);
+  // 4. 等待后端处理进度入库 (服务端异步写入需要时间，留足 2.5 秒)
+  console.log(`[${NAME}] 等待服务端更新任务状态...`);
+  await sleep(2500);
 
   // 5. 任务列表查询与领取
   const listRes = await getJson(LIST_URL);
+  console.log(`[${NAME}] taskList 响应: HTTP ${listRes.status} ${String(listRes.body).slice(0, 200)}`);
+
   if (listRes.error) {
     rows.push(`任务列表: 请求失败 (${listRes.error})`);
   } else if (isAuthError(listRes)) {
@@ -273,19 +310,24 @@ async function main() {
     if (!tasks.length) {
       rows.push("任务列表: 未解析到任务");
     } else {
+      console.log(`[${NAME}] taskList 识别到 ${tasks.length} 项任务`);
       let claimedCount = 0;
       for (const t of tasks) {
+        const label = taskLabel(t);
         if (claimable(t)) {
-          const label = taskLabel(t);
-          console.log(`[${NAME}] 发现可领任务: ${label}`);
+          console.log(`[${NAME}] 发现可领任务 -> ${label}`);
           const claimRes = await claimReward(t);
           rows.push(result(`领取[${label}]`, claimRes));
           claimedCount++;
-          await sleep(600);
+          await sleep(800);
+        } else if (alreadyClaimed(t)) {
+          console.log(`[${NAME}] 任务 [${label}] 之前已领过`);
+        } else {
+          console.log(`[${NAME}] 任务 [${label}] 未达成或非目标`);
         }
       }
       if (claimedCount === 0) {
-        rows.push("奖励领取: 暂无可领取的奖励");
+        rows.push("奖励领取: 暂无可领取的奖励 (已全部领完)");
       }
     }
   }
