@@ -81,9 +81,9 @@ function parseJSON(body) {
   try { return JSON.parse(body || "{}"); } catch (e) { return null; }
 }
 
-const ID_FIELDS = ["taskId", "taskID", "task_id", "id", "taskCode"];
-const RECEIVED_FIELDS = ["isReceive", "isReceived", "received", "hasReceive", "hasReceived", "isGetReward", "isGet", "receiveFlag", "rewardFlag"];
-const NAME_FIELDS = ["taskDesc", "taskName", "task_name", "name", "title"];
+const ID_FIELDS = ["taskId", "taskID", "task_id", "id", "userTaskId", "userTaskID", "taskCode"];
+const RECEIVED_FIELDS = ["isReceive", "isReceived", "received", "hasReceive", "hasReceived", "isGetReward", "isGet", "receiveFlag", "rewardFlag", "claimed"];
+const NAME_FIELDS = ["taskName", "name", "title", "taskTitle", "taskDesc", "task_name", "description"];
 
 function pick(obj, fields) {
   for (let i = 0; i < fields.length; i++) {
@@ -95,17 +95,22 @@ function pick(obj, fields) {
 
 function truthy(v) { return v === true || v === 1 || v === "1" || v === "true"; }
 
-function collectTasks(node, out) {
+function collectTasks(node, out, seen = {}) {
   if (!node || typeof node !== "object") return;
   if (Array.isArray(node)) {
-    node.forEach((item) => collectTasks(item, out));
+    node.forEach((item) => collectTasks(item, out, seen));
     return;
   }
-  if (pick(node, ID_FIELDS) && (pick(node, ["progressStatus", "status", "taskStatus"]) || pick(node, RECEIVED_FIELDS) || pick(node, ["currentProgressValue", "targetProgressValue"]))) {
-    out.push(node);
-    return;
+  const id = pick(node, ID_FIELDS);
+  const name = pick(node, NAME_FIELDS);
+  if (id && (name || pick(node, ["status", "progressStatus", "taskStatus"]) || pick(node, RECEIVED_FIELDS))) {
+    const key = String(id.value);
+    if (!seen[key]) {
+      seen[key] = 1;
+      out.push(node);
+    }
   }
-  Object.keys(node).forEach((k) => collectTasks(node[k], out));
+  Object.keys(node).forEach((k) => collectTasks(node[k], out, seen));
 }
 
 function taskLabel(t) {
@@ -115,8 +120,8 @@ function taskLabel(t) {
 }
 
 function taskProgressText(t) {
-  const curItem = pick(t, ["currentProgressValue", "progress", "currentProgress", "finishNum", "completeNum"]);
-  const maxItem = pick(t, ["targetProgressValue", "targetNum", "totalNum", "maxNum", "needNum"]);
+  const curItem = pick(t, ["currentProgressValue", "progress", "currentProgress", "finishNum", "completeNum", "finishCount", "count", "current"]);
+  const maxItem = pick(t, ["targetProgressValue", "targetNum", "totalNum", "maxNum", "needNum", "targetCount", "target", "need", "maxCount"]);
   if (curItem) {
     return `${curItem.value}/${maxItem ? maxItem.value : "?"}`;
   }
@@ -126,10 +131,10 @@ function taskProgressText(t) {
 function isDone(t) {
   const r = pick(t, RECEIVED_FIELDS);
   if (r && truthy(r.value)) return "已领奖";
-  const s = pick(t, ["progressStatus"]);
-  if (s && (s.value === 2 || s.value === "2")) return "待领奖";
-  const curItem = pick(t, ["currentProgressValue", "progress", "currentProgress", "finishNum", "completeNum"]);
-  const maxItem = pick(t, ["targetProgressValue", "targetNum", "totalNum", "maxNum", "needNum"]);
+  const s = pick(t, ["progressStatus", "status", "taskStatus"]);
+  if (s && (s.value === 1 || s.value === "1" || s.value === 2 || s.value === "2")) return "待领奖";
+  const curItem = pick(t, ["currentProgressValue", "progress", "currentProgress", "finishNum", "completeNum", "finishCount", "count", "current"]);
+  const maxItem = pick(t, ["targetProgressValue", "targetNum", "totalNum", "maxNum", "needNum", "targetCount", "target", "need", "maxCount"]);
   const cur = Number(curItem ? curItem.value : NaN);
   const max = Number(maxItem ? maxItem.value : NaN);
   if (isFinite(cur) && isFinite(max) && max > 0 && cur >= max) return "待领奖";
