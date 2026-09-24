@@ -1,9 +1,6 @@
-// 三国咸话登录凭据抓包脚本 (Surge http-request)
-// 智能区分与保存双通道凭据：
-// 1. wxforum 通道 (sgxh_wx_headers / sgxh_wx_token) —— 专用于 openMiniApp 与 signIn 签到
-// 2. api-xh 通道 (sgxh_xh_headers / sgxh_xh_token) —— 专用于 updateTaskProgress, taskList, taskReward
-// 3. 通用兜底 (sgxh_headers / sgxh_token)
-// 智能节流 (5秒)：进入页面只弹 1 次清晰通知，明确指示捕获到的通道
+// 三国咸话登录凭据与领奖接口抓包脚本 (Surge http-request)
+// 1. 捕获双通道凭据 (wxforum 签到通道 + api-xh 社区/任务通道)
+// 2. 核心侦听：监听用户在小程序内点击「领取」的真实请求，自动捕获真实领奖 URL 与参数结构！
 
 const NAME = "三国咸话";
 const HEADER_KEY = "sgxh_headers";
@@ -12,6 +9,7 @@ const XH_HDR_KEY = "sgxh_xh_headers";
 const XH_TOK_KEY = "sgxh_xh_token";
 const WX_HDR_KEY = "sgxh_wx_headers";
 const WX_TOK_KEY = "sgxh_wx_token";
+const REWARD_URL_KEY = "sgxh_confirmed_reward_url";
 const TIME_KEY = "sgxh_capture_time";
 const NOTIFY_KEY = "sgxh_last_notify";
 
@@ -44,10 +42,26 @@ try {
     $done({});
   } else {
     const url = String($request.url || "");
+    const method = String($request.method || "GET").toUpperCase();
     const host = (url.match(/^https?:\/\/([^/]+)/i) || ["", ""])[1].toLowerCase();
     const raw = $request.headers || {};
     const h = lowerHeaders(raw);
     const tok = pickToken(h);
+    const bodyStr = String($request.body || "");
+
+    // 1. 核心侦听：捕获用户在小程序内手动点击「领取」的真实请求
+    if (method === "POST" && !url.includes("updateTaskProgress") && !url.includes("signIn") && !url.includes("openMiniApp")) {
+      console.log(`[${NAME}] 捕获 POST 请求: ${method} ${url} body=${bodyStr}`);
+      if (/task|reward|receive|claim|award|get|draw/i.test(url)) {
+        $persistentStore.write(url, REWARD_URL_KEY);
+        console.log(`[${NAME}] 🎯 已锁定真实领奖接口: ${url}`);
+        $notification.post(
+          NAME,
+          "🎯 真实领奖接口已锁定！",
+          `接口: ${url.replace(/^https?:\/\/[^/]+/i, "")}\n参数: ${bodyStr.slice(0, 100)}\n后续将全自动调用此接口领奖！`
+        );
+      }
+    }
 
     if (!tok || tok.length < 8) {
       $done({});
@@ -57,7 +71,7 @@ try {
         if (!DROP[k] && h[k] !== "") saved[k] = h[k];
       });
 
-      // 通用兜底
+      // 通用保存
       $persistentStore.write(tok, TOKEN_KEY);
       $persistentStore.write(JSON.stringify(saved), HEADER_KEY);
       $persistentStore.write(String(Date.now()), TIME_KEY);
@@ -68,15 +82,13 @@ try {
       if (isXh) {
         $persistentStore.write(tok, XH_TOK_KEY);
         $persistentStore.write(JSON.stringify(saved), XH_HDR_KEY);
-        console.log(`[${NAME}] 捕获到【社区/任务 api-xh】核心凭据: ${tok.slice(0, 10)}...`);
       }
       if (isWx) {
         $persistentStore.write(tok, WX_TOK_KEY);
         $persistentStore.write(JSON.stringify(saved), WX_HDR_KEY);
-        console.log(`[${NAME}] 捕获到【签到 wxforum】凭据: ${tok.slice(0, 10)}...`);
       }
 
-      // 节流通知：5 秒内最多弹 1 次通知，指明捕获的通道
+      // 节流通知
       const lastNotify = Number($persistentStore.read(NOTIFY_KEY) || 0);
       const isThrottled = (Date.now() - lastNotify < 5000);
 
