@@ -1,12 +1,17 @@
 // 三国咸话登录凭据抓包脚本 (Surge http-request)
-// 核心优化：
-// 1. 全域支持：覆盖 api-xh, wxforum, xh, hi-gateway, api-forum-act, xianhua 全线域名
-// 2. 智能节流 (8秒)：每次打开小程序确保【恰好弹1次】捕获确认通知，绝不刷屏二十几个弹窗，也绝不无声无息！
-// 3. 自动规整 Token：去除首尾空格，确保持久化写入 sgxh_token / sgxh_headers
+// 智能区分与保存双通道凭据：
+// 1. wxforum 通道 (sgxh_wx_headers / sgxh_wx_token) —— 专用于 openMiniApp 与 signIn 签到
+// 2. api-xh 通道 (sgxh_xh_headers / sgxh_xh_token) —— 专用于 updateTaskProgress, taskList, taskReward
+// 3. 通用兜底 (sgxh_headers / sgxh_token)
+// 智能节流 (5秒)：进入页面只弹 1 次清晰通知，明确指示捕获到的通道
 
 const NAME = "三国咸话";
-const TOKEN_KEY = "sgxh_token";
 const HEADER_KEY = "sgxh_headers";
+const TOKEN_KEY = "sgxh_token";
+const XH_HDR_KEY = "sgxh_xh_headers";
+const XH_TOK_KEY = "sgxh_xh_token";
+const WX_HDR_KEY = "sgxh_wx_headers";
+const WX_TOK_KEY = "sgxh_wx_token";
 const TIME_KEY = "sgxh_capture_time";
 const NOTIFY_KEY = "sgxh_last_notify";
 
@@ -47,33 +52,42 @@ try {
     if (!tok || tok.length < 8) {
       $done({});
     } else {
-      const oldTok = $persistentStore.read(TOKEN_KEY) || "";
-      const isNew = (tok !== oldTok);
-
       const saved = {};
       Object.keys(h).forEach((k) => {
         if (!DROP[k] && h[k] !== "") saved[k] = h[k];
       });
 
-      // 无论新旧，持续将最新请求头与 Token 写入存储
+      // 通用兜底
       $persistentStore.write(tok, TOKEN_KEY);
       $persistentStore.write(JSON.stringify(saved), HEADER_KEY);
       $persistentStore.write(String(Date.now()), TIME_KEY);
 
-      // 节流通知：8 秒内最多弹 1 次通知，既不轰炸刷屏，又确保能看到捕获成功的反馈！
+      const isXh = host.includes("api-xh") || host.includes("xh.sanguosha.cn") || host.includes("api-forum-act");
+      const isWx = host.includes("wxforum");
+
+      if (isXh) {
+        $persistentStore.write(tok, XH_TOK_KEY);
+        $persistentStore.write(JSON.stringify(saved), XH_HDR_KEY);
+        console.log(`[${NAME}] 捕获到【社区/任务 api-xh】核心凭据: ${tok.slice(0, 10)}...`);
+      }
+      if (isWx) {
+        $persistentStore.write(tok, WX_TOK_KEY);
+        $persistentStore.write(JSON.stringify(saved), WX_HDR_KEY);
+        console.log(`[${NAME}] 捕获到【签到 wxforum】凭据: ${tok.slice(0, 10)}...`);
+      }
+
+      // 节流通知：5 秒内最多弹 1 次通知，指明捕获的通道
       const lastNotify = Number($persistentStore.read(NOTIFY_KEY) || 0);
-      const isThrottled = (Date.now() - lastNotify < 8000);
+      const isThrottled = (Date.now() - lastNotify < 5000);
 
       if (!isThrottled) {
         $persistentStore.write(String(Date.now()), NOTIFY_KEY);
-        console.log(`[${NAME}] 成功捕获 Token: ${tok.slice(0, 10)}... (长 ${tok.length})`);
+        const channelName = isXh ? "社区/任务核心凭据 (api-xh)" : isWx ? "签到凭据 (wxforum)" : `通道 (${host})`;
         $notification.post(
           NAME,
-          "登录凭据已更新 ✅",
-          `域名: ${host}\nToken: ${tok.slice(0, 8)}... (${isNew ? "全新凭据" : "已重新核验"})\n可随时在 Surge 运行每日任务！`
+          "凭据已捕获 ✅",
+          `成功捕获: ${channelName}\nToken 长度: ${tok.length} 位`
         );
-      } else {
-        console.log(`[${NAME}] 并发请求静默存盘`);
       }
 
       $done({});
