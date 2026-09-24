@@ -1,7 +1,7 @@
 // 三国咸话每日自动任务 (Surge Cron / Generic 兼容)
 // 包含：打开小程序任务 + 每日签到 + 浏览帖子3次 + 自动领取今日任务奖励
-// 智能双通道 + 领奖端点智能探测与捕获自愈
-// 极速防超时：精准过滤今日可领任务，杜绝批量试探导致超时，2.5 秒内极速完成！
+// 核心优化：彻底隔离 wxforum (签到) 与 api-xh (社区/浏览/领奖) 双通道凭据，防止 HS256 算法错配
+// 极速防超时：全套流程 2 秒完成，支持真实领奖端点自动回放
 
 const NAME = "三国咸话";
 const HEADER_KEY = "sgxh_headers";
@@ -24,23 +24,34 @@ const CANDIDATE_REWARD_URLS = [
   "https://api-xh.sanguosha.cn/task/sgxh-task/receive",
   "https://api-xh.sanguosha.cn/task/sgxh-task/drawReward",
   "https://api-xh.sanguosha.cn/task/sgxh-task/claimReward",
-  "https://api-xh.sanguosha.cn/task/sgxh-task/receiveTaskReward",
-  "https://api-xh.sanguosha.cn/task/sgxh-task/claim",
-  "https://api-xh.sanguosha.cn/task/sgxh-task/taskReward"
+  "https://api-xh.sanguosha.cn/task/sgxh-task/receiveTaskReward"
 ];
 
 const DROP = { host: 1, connection: 1, "keep-alive": 1, "proxy-connection": 1, "transfer-encoding": 1, "content-length": 1, "content-encoding": 1, "accept-encoding": 1 };
 
+function isHs256Jwt(tok) {
+  return String(tok || "").includes("eyJhbGciOiJIUzI1Ni");
+}
+
 function savedHeaders(url) {
-  const isXh = url.includes("api-xh") || url.includes("xh.sanguosha.cn");
+  const isXh = url.includes("api-xh") || url.includes("xh.sanguosha.cn") || url.includes("api-forum-act");
   const isWx = url.includes("wxforum");
 
   let hdrRaw = "";
   let tokRaw = "";
 
   if (isXh) {
-    hdrRaw = $persistentStore.read(XH_HDR_KEY) || $persistentStore.read(HEADER_KEY) || "{}";
-    tokRaw = $persistentStore.read(XH_TOK_KEY) || $persistentStore.read(TOKEN_KEY) || "";
+    hdrRaw = $persistentStore.read(XH_HDR_KEY) || "{}";
+    tokRaw = $persistentStore.read(XH_TOK_KEY) || "";
+
+    // 严禁将 wxforum 的 HS256 Token 发给 api-xh
+    if (!tokRaw) {
+      const fallbackTok = $persistentStore.read(TOKEN_KEY) || "";
+      if (fallbackTok && !isHs256Jwt(fallbackTok)) {
+        tokRaw = fallbackTok;
+        hdrRaw = $persistentStore.read(HEADER_KEY) || "{}";
+      }
+    }
   } else if (isWx) {
     hdrRaw = $persistentStore.read(WX_HDR_KEY) || $persistentStore.read(HEADER_KEY) || "{}";
     tokRaw = $persistentStore.read(WX_TOK_KEY) || $persistentStore.read(TOKEN_KEY) || "";
@@ -69,21 +80,16 @@ function savedHeaders(url) {
     h.cookie = cookie;
   }
 
-  return h;
+  return { headers: h, token: tokRaw };
 }
 
 function headersFor(url) {
-  const h = savedHeaders(url);
+  const { headers } = savedHeaders(url);
   const route = String(url).replace(/^https?:\/\/[^/]+/i, "") || "/";
-  h["current-uri"] = route;
-  h["content-type"] = "application/json";
-  h.accept = h.accept || "application/json, text/plain, */*";
-  return h;
-}
-
-function hasCredential() {
-  const raw = $persistentStore.read(HEADER_KEY) || $persistentStore.read(TOKEN_KEY) || $persistentStore.read(XH_HDR_KEY);
-  return Boolean(raw);
+  headers["current-uri"] = route;
+  headers["content-type"] = "application/json";
+  headers.accept = headers.accept || "application/json, text/plain, */*";
+  return headers;
 }
 
 function parseJSON(body) {
@@ -99,7 +105,7 @@ function messageOf(body) {
 function isAuthError(r) {
   if (r.status === 401 || r.status === 403) return true;
   const str = String(r.body || "");
-  if (str.indexOf("未登录") !== -1 || str.indexOf("token已经过期") !== -1 || str.indexOf("token过期") !== -1 || str.indexOf("token失效") !== -1) {
+  if (str.indexOf("未登录") !== -1 || str.indexOf("token已经过期") !== -1 || str.indexOf("token过期") !== -1 || str.indexOf("token失效") !== -1 || str.indexOf("Unsupported algorithm") !== -1) {
     return true;
   }
   return false;
@@ -203,7 +209,6 @@ function alreadyClaimed(t) {
   return false;
 }
 
-// 目标任务精准识别：只领“今日浏览帖子3次”和日常签到，绝不误领“累计浏览500次”等超额任务避免浪费请求
 function isTargetDailyTask(t) {
   const label = taskLabel(t);
   if (/累计/i.test(label) || /100次|500次|600次|1000次/i.test(label)) return false;
@@ -212,7 +217,6 @@ function isTargetDailyTask(t) {
 
 function claimable(t) {
   if (alreadyClaimed(t)) return false;
-  // 必须是今日可完成的任务
   if (!isTargetDailyTask(t)) return false;
   return true;
 }
@@ -221,14 +225,12 @@ async function claimReward(t) {
   const id = taskIdOf(t);
   const confirmedUrl = $persistentStore.read(REWARD_URL_KEY) || "";
 
-  // 1. 如果已有抓包确认的真实领奖 URL，直接调用！
   if (confirmedUrl) {
     console.log(`[${NAME}] 使用已确认的领奖接口: ${confirmedUrl}`);
     const r = await postJson(confirmedUrl, { taskId: id });
     return r;
   }
 
-  // 2. 否则依次尝试候选端点，直到成功
   const urlsToTry = CANDIDATE_REWARD_URLS;
   let first = null;
 
@@ -245,7 +247,6 @@ async function claimReward(t) {
     console.log(`[${NAME}] 试探领奖端点 (${curUrl.replace(/^https?:\/\/[^/]+/i, "")}): HTTP ${r.status} ${messageOf(r.body)}`);
 
     if (isOk) {
-      // 成功命中！锁定该端点
       $persistentStore.write(curUrl, REWARD_URL_KEY);
       console.log(`[${NAME}] 🎯 成功锁定领奖接口: ${curUrl}`);
       return r;
@@ -261,7 +262,10 @@ async function claimReward(t) {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function main() {
-  if (!hasCredential()) {
+  const wxCred = savedHeaders(OPEN_URL);
+  const xhCred = savedHeaders(PROGRESS_URL);
+
+  if (!wxCred.token && !xhCred.token) {
     const msg = "未检测到凭据，请在微信中打开一次「三国咸话」小程序自动保存";
     console.log(`[${NAME}] ${msg}`);
     $notification.post(NAME, "未检测到凭据", msg);
@@ -271,7 +275,7 @@ async function main() {
 
   const rows = [];
 
-  // 1. 打开小程序任务 (150ms 紧凑设计)
+  // 1. 打开小程序任务
   const openRes = await postJson(OPEN_URL, { flag: 1 });
   rows.push(result("打开任务", openRes));
   console.log(`[${NAME}] 打开小程序: HTTP ${openRes.status} ${messageOf(openRes.body)}`);
@@ -283,50 +287,55 @@ async function main() {
   console.log(`[${NAME}] 每日签到: HTTP ${signRes.status} ${messageOf(signRes.body)}`);
   await sleep(150);
 
-  // 3. 浏览任务 (三次上报，紧凑防超时)
-  for (let i = 1; i <= 3; i++) {
-    const progRes = await postJson(PROGRESS_URL, { operateType: 1 });
-    rows.push(result(`浏览进度 ${i}/3`, progRes));
-    console.log(`[${NAME}] 浏览上报 #${i}: HTTP ${progRes.status} ${messageOf(progRes.body)}`);
-    if (i < 3) await sleep(150);
-  }
-
-  // 4. 等待后端落库 (500ms)
-  console.log(`[${NAME}] 等待服务端更新任务状态...`);
-  await sleep(500);
-
-  // 5. 任务列表查询与精准领奖
-  const listRes = await getJson(LIST_URL);
-  console.log(`[${NAME}] taskList 响应: HTTP ${listRes.status} ${String(listRes.body).slice(0, 160)}`);
-
-  if (listRes.error) {
-    rows.push(`任务列表: 请求失败 (${listRes.error})`);
-  } else if (isAuthError(listRes)) {
-    rows.push("任务列表: 社区凭据失效");
+  // 3. 浏览任务 (需要 api-xh 社区凭据)
+  if (!xhCred.token) {
+    rows.push("浏览任务: 缺少社区专属凭据 (请在小程序点进任意【帖子】抓取)");
+    rows.push("任务列表: 缺少社区专属凭据");
   } else {
-    const data = parseJSON(listRes.body);
-    const tasks = [];
-    collectTasks(data, tasks);
+    for (let i = 1; i <= 3; i++) {
+      const progRes = await postJson(PROGRESS_URL, { operateType: 1 });
+      rows.push(result(`浏览进度 ${i}/3`, progRes));
+      console.log(`[${NAME}] 浏览上报 #${i}: HTTP ${progRes.status} ${messageOf(progRes.body)}`);
+      if (i < 3) await sleep(150);
+    }
 
-    if (!tasks.length) {
-      rows.push("任务列表: 未解析到任务");
+    // 4. 等待后端落库 (500ms)
+    console.log(`[${NAME}] 等待服务端更新任务状态...`);
+    await sleep(500);
+
+    // 5. 任务列表查询与精准领奖
+    const listRes = await getJson(LIST_URL);
+    console.log(`[${NAME}] taskList 响应: HTTP ${listRes.status} ${String(listRes.body).slice(0, 160)}`);
+
+    if (listRes.error) {
+      rows.push(`任务列表: 请求失败 (${listRes.error})`);
+    } else if (isAuthError(listRes)) {
+      rows.push(`任务列表: 社区凭据失效 (${messageOf(listRes.body)})`);
     } else {
-      console.log(`[${NAME}] taskList 识别到 ${tasks.length} 项任务`);
-      let claimedCount = 0;
-      for (const t of tasks) {
-        const label = taskLabel(t);
-        if (claimable(t)) {
-          console.log(`[${NAME}] 发现今日目标任务 -> ${label} (ID: ${taskIdOf(t)})`);
-          const claimRes = await claimReward(t);
-          rows.push(result(`领取[${label}]`, claimRes));
-          claimedCount++;
-          await sleep(150);
-        } else if (alreadyClaimed(t)) {
-          console.log(`[${NAME}] 任务 [${label}] 已领过`);
+      const data = parseJSON(listRes.body);
+      const tasks = [];
+      collectTasks(data, tasks);
+
+      if (!tasks.length) {
+        rows.push("任务列表: 未解析到任务");
+      } else {
+        console.log(`[${NAME}] taskList 识别到 ${tasks.length} 项任务`);
+        let claimedCount = 0;
+        for (const t of tasks) {
+          const label = taskLabel(t);
+          if (claimable(t)) {
+            console.log(`[${NAME}] 发现今日目标任务 -> ${label} (ID: ${taskIdOf(t)})`);
+            const claimRes = await claimReward(t);
+            rows.push(result(`领取[${label}]`, claimRes));
+            claimedCount++;
+            await sleep(150);
+          } else if (alreadyClaimed(t)) {
+            console.log(`[${NAME}] 任务 [${label}] 已领过`);
+          }
         }
-      }
-      if (claimedCount === 0) {
-        rows.push("奖励领取: 今日目标奖励已全部领取完毕");
+        if (claimedCount === 0) {
+          rows.push("奖励领取: 今日目标奖励已全部领取完毕");
+        }
       }
     }
   }
