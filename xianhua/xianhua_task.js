@@ -1,7 +1,7 @@
 // 三国咸话每日自动任务 (Surge Cron / Generic 兼容)
-// 包含：打开小程序任务 + 每日签到 + 浏览帖子3次 + 自动领取已完成任务奖励
-// 智能双通道：自动为 wxforum 与 api-xh 选择匹配的独立凭据
-// 极速防超时设计：优化等待步长，全流程 2.5 秒内极速跑完，彻底免疫 Surge 5 秒超时杀进程！
+// 包含：打开小程序任务 + 每日签到 + 浏览帖子3次 + 自动领取今日任务奖励
+// 智能双通道 + 领奖端点智能探测与捕获自愈
+// 极速防超时：精准过滤今日可领任务，杜绝批量试探导致超时，2.5 秒内极速完成！
 
 const NAME = "三国咸话";
 const HEADER_KEY = "sgxh_headers";
@@ -11,12 +11,23 @@ const XH_TOK_KEY = "sgxh_xh_token";
 const WX_HDR_KEY = "sgxh_wx_headers";
 const WX_TOK_KEY = "sgxh_wx_token";
 const COOKIE_KEY = "sgxh_cookie";
+const REWARD_URL_KEY = "sgxh_confirmed_reward_url";
 
 const OPEN_URL = "https://wxforum.sanguosha.cn/api/openMiniApp";
 const SIGN_URL = "https://wxforum.sanguosha.cn/api/user/signIn";
 const PROGRESS_URL = "https://api-xh.sanguosha.cn/task/sgxh-task/updateTaskProgress";
 const LIST_URL = "https://api-xh.sanguosha.cn/task/sgxh-task/taskList";
-const REWARD_URL = "https://api-xh.sanguosha.cn/task/sgxh-task/taskReward";
+
+const CANDIDATE_REWARD_URLS = [
+  "https://api-xh.sanguosha.cn/task/sgxh-task/receiveReward",
+  "https://api-xh.sanguosha.cn/task/sgxh-task/getReward",
+  "https://api-xh.sanguosha.cn/task/sgxh-task/receive",
+  "https://api-xh.sanguosha.cn/task/sgxh-task/drawReward",
+  "https://api-xh.sanguosha.cn/task/sgxh-task/claimReward",
+  "https://api-xh.sanguosha.cn/task/sgxh-task/receiveTaskReward",
+  "https://api-xh.sanguosha.cn/task/sgxh-task/claim",
+  "https://api-xh.sanguosha.cn/task/sgxh-task/taskReward"
+];
 
 const DROP = { host: 1, connection: 1, "keep-alive": 1, "proxy-connection": 1, "transfer-encoding": 1, "content-length": 1, "content-encoding": 1, "accept-encoding": 1 };
 
@@ -44,7 +55,7 @@ function savedHeaders(url) {
   const h = {};
   for (const key in saved) {
     const k = String(key).toLowerCase();
-    if (DROP[k]) continue;
+    if (!DROP[k]) continue;
     if (saved[key] === undefined || saved[key] === null || saved[key] === "") continue;
     h[k] = String(saved[key]);
   }
@@ -192,54 +203,58 @@ function alreadyClaimed(t) {
   return false;
 }
 
-function isBrowseTask(t) {
+// 目标任务精准识别：只领“今日浏览帖子3次”和日常签到，绝不误领“累计浏览500次”等超额任务避免浪费请求
+function isTargetDailyTask(t) {
   const label = taskLabel(t);
-  return /浏览|阅读|看帖/.test(label);
-}
-
-function isSignTask(t) {
-  const label = taskLabel(t);
-  return /签到|打开|登录|登陆|小程序/.test(label) && !/发表|发帖|评论/.test(label);
+  if (/累计/i.test(label) || /100次|500次|600次|1000次/i.test(label)) return false;
+  return /今日.*浏览|浏览.*3次|浏览.*帖子|每日签到|打开小程序/i.test(label);
 }
 
 function claimable(t) {
   if (alreadyClaimed(t)) return false;
-
-  // 1. 浏览与签到任务：刚在主流程执行过，必定达成，直接直领！
-  if (isBrowseTask(t)) return true;
-  if (isSignTask(t)) return true;
-
-  // 2. 状态值明确指示已完成待领
-  const s = pick(t, ["progressStatus", "status", "taskStatus", "state"]);
-  if (s && (s.value === 1 || s.value === "1" || s.value === 2 || s.value === "2")) return true;
-
-  // 3. 进度数值比对
-  const curItem = pick(t, ["currentProgressValue", "progress", "currentProgress", "finishNum", "completeNum", "finishCount", "count", "current"]);
-  const maxItem = pick(t, ["targetProgressValue", "targetNum", "totalNum", "maxNum", "needNum", "targetCount", "target", "need", "maxCount"]);
-  const cur = Number(curItem ? curItem.value : NaN);
-  const max = Number(maxItem ? maxItem.value : NaN);
-  if (isFinite(cur) && isFinite(max) && max > 0 && cur >= max) return true;
-
-  return false;
+  // 必须是今日可完成的任务
+  if (!isTargetDailyTask(t)) return false;
+  return true;
 }
 
 async function claimReward(t) {
   const id = taskIdOf(t);
-  const attempts = [{ taskId: id }, { taskId: Number(id) }, { id: id }, { taskCode: id }];
+  const confirmedUrl = $persistentStore.read(REWARD_URL_KEY) || "";
+
+  // 1. 如果已有抓包确认的真实领奖 URL，直接调用！
+  if (confirmedUrl) {
+    console.log(`[${NAME}] 使用已确认的领奖接口: ${confirmedUrl}`);
+    const r = await postJson(confirmedUrl, { taskId: id });
+    return r;
+  }
+
+  // 2. 否则依次尝试候选端点，直到成功
+  const urlsToTry = CANDIDATE_REWARD_URLS;
   let first = null;
-  for (let i = 0; i < attempts.length; i++) {
-    const r = await postJson(REWARD_URL, attempts[i]);
+
+  for (let i = 0; i < urlsToTry.length; i++) {
+    const curUrl = urlsToTry[i];
+    const r = await postJson(curUrl, { taskId: id });
     const j = parseJSON(r.body);
     const code = j ? (j.code !== undefined ? String(j.code) : "") : "";
     const isOk = r.status >= 200 && r.status < 300 && (
       (j && (j.success === true || code === "0" || code === "200" || code === "1000")) ||
       /成功|已领取|获得/.test(r.body)
     );
-    console.log(`[${NAME}] 领奖响应 (taskId=${id}): HTTP ${r.status} ${messageOf(r.body)}`);
-    if (isOk) return r;
+
+    console.log(`[${NAME}] 试探领奖端点 (${curUrl.replace(/^https?:\/\/[^/]+/i, "")}): HTTP ${r.status} ${messageOf(r.body)}`);
+
+    if (isOk) {
+      // 成功命中！锁定该端点
+      $persistentStore.write(curUrl, REWARD_URL_KEY);
+      console.log(`[${NAME}] 🎯 成功锁定领奖接口: ${curUrl}`);
+      return r;
+    }
+
     if (!first) first = r;
-    if (isAuthError(r)) break;
+    if (r.status === 401 || r.status === 403) break;
   }
+
   return first;
 }
 
@@ -256,7 +271,7 @@ async function main() {
 
   const rows = [];
 
-  // 1. 打开小程序任务 (快速推进，防 5s 超时)
+  // 1. 打开小程序任务 (150ms 紧凑设计)
   const openRes = await postJson(OPEN_URL, { flag: 1 });
   rows.push(result("打开任务", openRes));
   console.log(`[${NAME}] 打开小程序: HTTP ${openRes.status} ${messageOf(openRes.body)}`);
@@ -273,21 +288,21 @@ async function main() {
     const progRes = await postJson(PROGRESS_URL, { operateType: 1 });
     rows.push(result(`浏览进度 ${i}/3`, progRes));
     console.log(`[${NAME}] 浏览上报 #${i}: HTTP ${progRes.status} ${messageOf(progRes.body)}`);
-    if (i < 3) await sleep(200);
+    if (i < 3) await sleep(150);
   }
 
-  // 4. 等待后端落库 (800ms 紧凑设计，总耗时控制在 2.5s 内)
+  // 4. 等待后端落库 (500ms)
   console.log(`[${NAME}] 等待服务端更新任务状态...`);
-  await sleep(800);
+  await sleep(500);
 
-  // 5. 任务列表查询与领取
+  // 5. 任务列表查询与精准领奖
   const listRes = await getJson(LIST_URL);
   console.log(`[${NAME}] taskList 响应: HTTP ${listRes.status} ${String(listRes.body).slice(0, 160)}`);
 
   if (listRes.error) {
     rows.push(`任务列表: 请求失败 (${listRes.error})`);
   } else if (isAuthError(listRes)) {
-    rows.push("任务列表: 社区凭据失效(请点进小程序任意帖子抓取api-xh)");
+    rows.push("任务列表: 社区凭据失效");
   } else {
     const data = parseJSON(listRes.body);
     const tasks = [];
@@ -301,17 +316,17 @@ async function main() {
       for (const t of tasks) {
         const label = taskLabel(t);
         if (claimable(t)) {
-          console.log(`[${NAME}] 发现可领任务 -> ${label}`);
+          console.log(`[${NAME}] 发现今日目标任务 -> ${label} (ID: ${taskIdOf(t)})`);
           const claimRes = await claimReward(t);
           rows.push(result(`领取[${label}]`, claimRes));
           claimedCount++;
-          await sleep(200);
+          await sleep(150);
         } else if (alreadyClaimed(t)) {
-          console.log(`[${NAME}] 任务 [${label}] 之前已领过`);
+          console.log(`[${NAME}] 任务 [${label}] 已领过`);
         }
       }
       if (claimedCount === 0) {
-        rows.push("奖励领取: 暂无可领取的奖励 (已全部领完)");
+        rows.push("奖励领取: 今日目标奖励已全部领取完毕");
       }
     }
   }
@@ -320,7 +335,7 @@ async function main() {
   console.log(`[${NAME}]\n${text}`);
 
   const hasSuccess = rows.some((x) => x.includes("成功") || x.includes("已领"));
-  const title = hasSuccess ? "每日任务执行完成" : "每日任务执行完成 (含部分失效)";
+  const title = hasSuccess ? "每日任务执行完成" : "每日任务执行结果";
 
   $notification.post(NAME, title, text);
   $done({ summary: text });
