@@ -1,25 +1,16 @@
-// 三国咸话每日自动任务 (Surge Cron / Generic 兼容)
-// 包含：打开小程序任务 + 每日签到 + 浏览帖子3次 + 自动领取今日任务奖励
-// 还原 11:23 验证通过的黄金请求头基线，全流程 1.5 秒极速完成！
+// 三国咸话 —— Surge 每日自动任务 (100% 复刻 QX 经典稳定版本 xianhua.qx.auto2.js)
+// 包含：打开小程序任务 + 每日签到 + 浏览帖子 3 次 + 任务列表核验
+// 干净纯粹，无多余逻辑，绝不超时
 
 const NAME = "三国咸话";
 const HEADER_KEY = "sgxh_headers";
-const TOKEN_KEY = "sgxh_token";
 const COOKIE_KEY = "sgxh_cookie";
-const REWARD_URL_KEY = "sgxh_confirmed_reward_url";
+const TOKEN_KEY = "sgxh_token";
 
 const OPEN_URL = "https://wxforum.sanguosha.cn/api/openMiniApp";
 const SIGN_URL = "https://wxforum.sanguosha.cn/api/user/signIn";
 const PROGRESS_URL = "https://api-xh.sanguosha.cn/task/sgxh-task/updateTaskProgress";
 const LIST_URL = "https://api-xh.sanguosha.cn/task/sgxh-task/taskList";
-
-const CANDIDATE_REWARD_URLS = [
-  "https://api-xh.sanguosha.cn/task/sgxh-task/receiveReward",
-  "https://api-xh.sanguosha.cn/task/sgxh-task/getReward",
-  "https://api-xh.sanguosha.cn/task/sgxh-task/receive",
-  "https://api-xh.sanguosha.cn/task/sgxh-task/drawReward",
-  "https://api-xh.sanguosha.cn/task/sgxh-task/claimReward"
-];
 
 const DROP = { host: 1, connection: 1, "keep-alive": 1, "proxy-connection": 1, "transfer-encoding": 1, "content-length": 1, "content-encoding": 1, "accept-encoding": 1 };
 
@@ -29,35 +20,34 @@ function savedHeaders() {
     saved = JSON.parse($persistentStore.read(HEADER_KEY) || "{}");
   } catch (e) {}
   const h = {};
-  for (const key in saved) {
+  Object.keys(saved).forEach((key) => {
     const k = String(key).toLowerCase();
-    if (DROP[k]) continue;
-    if (saved[key] === undefined || saved[key] === null || saved[key] === "") continue;
-    h[k] = String(saved[key]);
-  }
-  const token = $persistentStore.read(TOKEN_KEY) || "";
-  if (token && !h.authorization && !h.token && !h["x-token"]) {
-    h.authorization = token;
-  }
+    if (!DROP[k] && saved[key] !== undefined && saved[key] !== null && saved[key] !== "") {
+      h[k] = String(saved[key]);
+    }
+  });
   const cookie = $persistentStore.read(COOKIE_KEY);
-  if (cookie && !h.cookie) {
-    h.cookie = cookie;
+  if (cookie) h.cookie = cookie;
+  const token = $persistentStore.read(TOKEN_KEY);
+  if (token && !h.authorization && !h.token && !h["x-token"] && !h["x-auth-token"]) {
+    h.authorization = token;
   }
   return h;
 }
 
 function headersFor(url) {
   const h = savedHeaders();
-  const route = String(url).replace(/^https?:\/\/[^/]+/i, "") || "/";
-  h["current-uri"] = route;
+  h["current-uri"] = String(url).replace(/^https?:\/\/[^/]+/i, "") || "/";
   h["content-type"] = "application/json";
   h.accept = h.accept || "application/json, text/plain, */*";
+  h.origin = h.origin || "https://xianhua.sanguosha.cn";
+  h.referer = h.referer || "https://xianhua.sanguosha.cn/";
   return h;
 }
 
 function hasCredential() {
-  const raw = $persistentStore.read(HEADER_KEY) || $persistentStore.read(TOKEN_KEY);
-  return Boolean(raw);
+  const h = savedHeaders();
+  return Boolean(h.authorization || h.token || h["x-token"] || h["x-auth-token"] || h.cookie);
 }
 
 function parseJSON(body) {
@@ -70,18 +60,9 @@ function messageOf(body) {
   return j.message || j.msg || (j.data && (j.data.message || j.data.msg)) || (j.success === true ? "成功" : "请求完成");
 }
 
-function isAuthError(r) {
-  if (r.status === 401 || r.status === 403) return true;
-  const str = String(r.body || "");
-  if (str.indexOf("未登录") !== -1 || str.indexOf("token已经过期") !== -1 || str.indexOf("token过期") !== -1 || str.indexOf("token失效") !== -1) {
-    return true;
-  }
-  return false;
-}
-
 function result(label, r) {
   if (r.error) return `${label}: 请求失败 (${r.error})`;
-  if (isAuthError(r)) return `${label}: 凭据失效 (${messageOf(r.body)})`;
+  if (r.status === 401 || r.status === 403) return `${label}: 登录凭据失效`;
   if (r.status >= 200 && r.status < 300) return `${label}: ${messageOf(r.body)}`;
   return `${label}: HTTP ${r.status} ${messageOf(r.body)}`;
 }
@@ -127,108 +108,6 @@ function getJson(url) {
   });
 }
 
-const ID_FIELDS = ["taskId", "taskID", "task_id", "id", "userTaskId", "userTaskID", "taskCode"];
-const RECEIVED_FIELDS = ["isReceive", "isReceived", "received", "hasReceive", "hasReceived", "isGetReward", "isGet", "receiveFlag", "rewardFlag", "claimed"];
-const NAME_FIELDS = ["taskName", "name", "title", "taskTitle", "taskDesc", "task_name", "description"];
-
-function pick(obj, fields) {
-  for (let i = 0; i < fields.length; i++) {
-    const f = fields[i];
-    if (obj[f] !== undefined && obj[f] !== null) return { field: f, value: obj[f] };
-  }
-  return null;
-}
-
-function truthy(v) { return v === true || v === 1 || v === "1" || v === "true"; }
-
-function collectTasks(node, out, seen = {}) {
-  if (!node || typeof node !== "object") return;
-  if (Array.isArray(node)) {
-    node.forEach((item) => collectTasks(item, out, seen));
-    return;
-  }
-  const id = pick(node, ID_FIELDS);
-  const name = pick(node, NAME_FIELDS);
-  if (id && (name || pick(node, ["status", "progressStatus", "taskStatus"]) || pick(node, RECEIVED_FIELDS))) {
-    const key = String(id.value);
-    if (!seen[key]) {
-      seen[key] = 1;
-      out.push(node);
-    }
-  }
-  Object.keys(node).forEach((k) => collectTasks(node[k], out, seen));
-}
-
-function taskIdOf(t) {
-  const id = pick(t, ID_FIELDS);
-  return id ? id.value : undefined;
-}
-
-function taskLabel(t) {
-  const n = pick(t, NAME_FIELDS);
-  return String((n && n.value) || taskIdOf(t) || "未知任务");
-}
-
-function alreadyClaimed(t) {
-  const r = pick(t, RECEIVED_FIELDS);
-  if (r && truthy(r.value)) return true;
-  const s = pick(t, ["receiveStatus", "userTaskStatus"]);
-  if (s && (s.value === 1 || s.value === "1" || s.value === 2 || s.value === "2")) return true;
-  return false;
-}
-
-// 目标任务精准识别：只领“今日浏览帖子3次”，坚决排除累计几百次的成就任务
-function isTargetDailyTask(t) {
-  const label = taskLabel(t);
-  if (/累计/i.test(label) || /100次|500次|600次|1000次/i.test(label)) return false;
-  return /今日.*浏览|浏览.*3次|浏览.*帖子/i.test(label);
-}
-
-function claimable(t) {
-  if (alreadyClaimed(t)) return false;
-  return isTargetDailyTask(t);
-}
-
-async function claimReward(t) {
-  const id = taskIdOf(t);
-  const confirmedUrl = $persistentStore.read(REWARD_URL_KEY) || "";
-
-  // 1. 如果已有抓包确认的真实领奖 URL，直接调用
-  if (confirmedUrl) {
-    console.log(`[${NAME}] 使用已确认领奖端点: ${confirmedUrl}`);
-    const r = await postJson(confirmedUrl, { taskId: id });
-    return r;
-  }
-
-  // 2. 依次试探候选端点
-  const urlsToTry = CANDIDATE_REWARD_URLS;
-  let first = null;
-
-  for (let i = 0; i < urlsToTry.length; i++) {
-    const curUrl = urlsToTry[i];
-    const r = await postJson(curUrl, { taskId: id });
-    const j = parseJSON(r.body);
-    const code = j ? (j.code !== undefined ? String(j.code) : "") : "";
-    const isOk = r.status >= 200 && r.status < 300 && (
-      (j && (j.success === true || code === "0" || code === "200" || code === "1000")) ||
-      /成功|已领取|获得/.test(r.body)
-    );
-
-    console.log(`[${NAME}] 试探端点 (${curUrl.replace(/^https?:\/\/[^/]+/i, "")}): HTTP ${r.status} ${messageOf(r.body)}`);
-
-    if (isOk) {
-      $persistentStore.write(curUrl, REWARD_URL_KEY);
-      console.log(`[${NAME}] 🎯 成功锁定领奖接口: ${curUrl}`);
-      return r;
-    }
-
-    if (!first) first = r;
-    if (r.status === 401 || r.status === 403) break;
-  }
-
-  return first;
-}
-
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function main() {
@@ -242,71 +121,34 @@ async function main() {
 
   const rows = [];
 
-  // 1. 打开小程序任务 (100ms)
-  const openRes = await postJson(OPEN_URL, { flag: 1 });
-  rows.push(result("打开任务", openRes));
-  console.log(`[${NAME}] 打开小程序: HTTP ${openRes.status} ${messageOf(openRes.body)}`);
-  await sleep(100);
+  // 1. 打开小程序任务
+  rows.push(result("打开任务", await postJson(OPEN_URL, { flag: 1 })));
+  await sleep(600);
 
-  // 2. 每日签到 (100ms)
-  const signRes = await postJson(SIGN_URL, {});
-  rows.push(result("每日签到", signRes));
-  console.log(`[${NAME}] 每日签到: HTTP ${signRes.status} ${messageOf(signRes.body)}`);
-  await sleep(100);
+  // 2. 每日签到
+  rows.push(result("每日签到", await postJson(SIGN_URL, {})));
+  await sleep(600);
 
-  // 3. 浏览任务 (三次上报，紧凑防超时)
+  // 3. 连续完成浏览帖子 3 次 (与 QX 完全一致)
   for (let i = 1; i <= 3; i++) {
     const progRes = await postJson(PROGRESS_URL, { operateType: 1 });
-    rows.push(result(`浏览进度 ${i}/3`, progRes));
+    rows.push(result(`浏览帖子 ${i}/3`, progRes));
     console.log(`[${NAME}] 浏览上报 #${i}: HTTP ${progRes.status} ${messageOf(progRes.body)}`);
-    if (i < 3) await sleep(100);
+    if (i < 3) await sleep(800);
   }
 
-  // 4. 等待后端处理 (500ms)
-  console.log(`[${NAME}] 等待服务端更新任务状态...`);
-  await sleep(500);
+  // 4. 等待后端入库
+  await sleep(1000);
 
-  // 5. 任务列表查询与精准领奖
+  // 5. 任务状态核验
   const listRes = await getJson(LIST_URL);
-  console.log(`[${NAME}] taskList 响应: HTTP ${listRes.status} ${String(listRes.body).slice(0, 160)}`);
-
-  if (listRes.error) {
-    rows.push(`任务列表: 请求失败 (${listRes.error})`);
-  } else if (isAuthError(listRes)) {
-    rows.push(`任务列表: 凭据失效 (${messageOf(listRes.body)})`);
-  } else {
-    const data = parseJSON(listRes.body);
-    const tasks = [];
-    collectTasks(data, tasks);
-
-    if (!tasks.length) {
-      rows.push("任务列表: 未解析到任务");
-    } else {
-      console.log(`[${NAME}] taskList 识别到 ${tasks.length} 项任务`);
-      let claimedCount = 0;
-      for (const t of tasks) {
-        const label = taskLabel(t);
-        if (claimable(t)) {
-          console.log(`[${NAME}] 发现今日目标任务 -> ${label} (ID: ${taskIdOf(t)})`);
-          const claimRes = await claimReward(t);
-          rows.push(result(`领取[${label}]`, claimRes));
-          claimedCount++;
-          await sleep(100);
-        } else if (alreadyClaimed(t)) {
-          console.log(`[${NAME}] 任务 [${label}] 已领过`);
-        }
-      }
-      if (claimedCount === 0) {
-        rows.push("奖励领取: 今日目标奖励已全部领取完毕");
-      }
-    }
-  }
+  rows.push(result("任务查询", listRes));
 
   const text = rows.join("\n");
   console.log(`[${NAME}]\n${text}`);
 
-  const hasSuccess = rows.some((x) => x.includes("成功") || x.includes("已领"));
-  const title = hasSuccess ? "每日任务执行完成" : "每日任务执行结果";
+  const hasExpired = rows.some((x) => x.includes("凭据失效") || x.includes("401") || x.includes("403"));
+  const title = hasExpired ? "登录凭据失效" : "每日任务执行完成";
 
   $notification.post(NAME, title, text);
   $done({ summary: text });
