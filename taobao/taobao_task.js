@@ -1,5 +1,5 @@
-// 淘宝淘金币 —— Surge 每日签到任务 (Cron / Generic 兼容)
-// 结构：纯 JS MD5 -> mtop H5 网关层（动态重签与 Token 自动续期舞步）-> 任务回放
+// 淘宝淘金币 —— Surge 每日签到任务 v2 (Cron / Generic 兼容)
+// 结构：纯 JS MD5 -> 基于抓包模板的 mtop 完整回放（保留原请求头/方法/参数，仅重签 t/sign，令牌过期自动续期）
 
 /* ================= 1. 纯 JS MD5 实现 (RFC 1321) ================= */
 function md5(s) {
@@ -58,41 +58,28 @@ function md5(s) {
   return hx(a) + hx(b) + hx(c) + hx(d);
 }
 
-/* ================= 2. mtop H5 网关通用层 ================= */
+/* ================= 2. 通用工具 ================= */
+const NAME = "淘金币";
+const K_API = "tb_api";
+const K_COOKIE = "tb_cookie";
+const K_RESP = "tb_resp";
+const APP_KEY = "12574478";
+const HOP = { host: 1, connection: 1, "content-length": 1, "accept-encoding": 1, "content-encoding": 1, "transfer-encoding": 1, "proxy-connection": 1 };
+
+function parseJSON(s) { try { return JSON.parse(s); } catch (e) { return null; } }
+
+function cookieMap(s) {
+  const o = {};
+  String(s || "").split(";").forEach((p) => {
+    const i = p.indexOf("=");
+    if (i > 0) o[p.slice(0, i).trim()] = p.slice(i + 1).trim();
+  });
+  return o;
+}
+
 function mtopToken(cookie) {
   const m = String(cookie || "").match(/(?:^|;\s*)_m_h5_tk=([0-9a-zA-Z]{32})/i);
   return m ? m[1] : "";
-}
-
-function mtopBuild(api, ver, dataStr, t, token) {
-  const full = String(api);
-  const bare = full.replace(/^mtop\./, "");
-  const sign = md5(token + "&" + t + "&12574478&" + dataStr);
-  const p = [
-    "jsv=2.7.2",
-    "appKey=12574478",
-    "t=" + t,
-    "sign=" + sign,
-    "api=" + encodeURIComponent(full),
-    "v=" + encodeURIComponent(ver),
-    "type=originaljson",
-    "dataType=json",
-    "timeout=10000",
-    "data=" + encodeURIComponent(dataStr)
-  ];
-  return "https://h5api.m.taobao.com/h5/mtop." + bare + "/" + ver + "/" + full + "/?" + p.join("&");
-}
-
-function mtopHeaders(cookie, referer) {
-  return {
-    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
-    "Accept": "application/json",
-    "Origin": "https://h5.m.taobao.com",
-    "Referer": referer || "https://h5.m.taobao.com/",
-    "Content-Type": "application/x-www-form-urlencoded",
-    "Cookie": cookie || "",
-    "X-Surge-Task": "1" // 防回环
-  };
 }
 
 function mtopNewToken(headers) {
@@ -115,149 +102,141 @@ function updTk(cookie, tk) {
   return parts.join("; ");
 }
 
-function sendGet(url, headers) {
+function encodeForm(obj) {
+  return Object.keys(obj).map((k) => encodeURIComponent(k) + "=" + encodeURIComponent(obj[k])).join("&");
+}
+
+function httpSend(method, url, headers, body) {
   return new Promise((resolve) => {
-    $httpClient.get({ url, headers }, (error, response, body) => {
+    const req = { url, headers };
+    if (body !== undefined && body !== null) req.body = body;
+    const cb = (error, response, resBody) => {
       if (error) {
         resolve({ error: String(error), status: 0, headers: {}, body: "" });
       } else {
-        const status = Number(response && (response.status || response.statusCode)) || 0;
-        const resHeaders = (response && response.headers) || {};
-        resolve({ error: null, status, headers: resHeaders, body: String(body || "") });
+        resolve({
+          error: null,
+          status: Number(response && (response.status || response.statusCode)) || 0,
+          headers: (response && response.headers) || {},
+          body: String(resBody || "")
+        });
       }
-    });
+    };
+    if (method === "POST") $httpClient.post(req, cb);
+    else $httpClient.get(req, cb);
   });
 }
 
-async function mtopCall(opts) {
-  const ver = opts.ver || "1.0";
-  const dataStr = JSON.stringify(opts.data || {});
-  let cookie = String(opts.cookie || "");
+/* ================= 3. 基于抓包模板的 mtop 重签回放 ================= */
+async function mtopReplay(rec, cookie) {
+  const api = String(rec.api || "");
+  const ver = String(rec.ver || "1.0");
+  const method = String(rec.method || "GET").toUpperCase();
+  const params = Object.assign({}, rec.params || {});
+  const dataStr = String(params.data || "{}");
+
+  // 还原抓包时的请求头（剔除 hop-by-hop），Cookie 用最新池
+  const headers = {};
+  Object.keys(rec.headers || {}).forEach((k) => {
+    const lk = String(k).toLowerCase();
+    if (!HOP[lk] && rec.headers[k] !== "") headers[lk] = String(rec.headers[k]);
+  });
+  headers["cookie"] = cookie;
+  headers["x-surge-task"] = "1";
+  if (!headers["user-agent"]) headers["user-agent"] = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
 
   async function attempt(token, tries) {
     const t = String(Date.now());
-    const url = mtopBuild(opts.api, ver, dataStr, t, token);
-    const r = await sendGet(url, mtopHeaders(cookie, opts.referer));
+    const sign = md5(token + "&" + t + "&" + APP_KEY + "&" + dataStr);
+    const p = Object.assign({}, params, { t, sign, appKey: params.appKey || APP_KEY, api, v: ver });
 
-    if (r.error) {
-      return { ok: false, body: "", json: null, ret: `NETWORK: ${r.error}`, cookie };
+    let url = rec.url;
+    let body;
+    if (method === "POST") {
+      // POST 表单：所有参数放 body
+      headers["content-type"] = "application/x-www-form-urlencoded";
+      body = encodeForm(p);
+    } else {
+      // GET：参数拼进 URL
+      url = rec.url + "?" + encodeForm(p);
     }
 
-    let j = null;
-    try { j = JSON.parse(r.body); } catch (e) {}
+    const r = await httpSend(method, url, headers, body);
+    if (r.error) return { ok: false, ret: "NETWORK:" + r.error, body: "", json: null, cookie };
+
+    const j = parseJSON(r.body);
     const ret = (j && j.ret && j.ret[0]) || "";
     const newTk = mtopNewToken(r.headers);
     if (newTk) cookie = updTk(cookie, newTk);
 
-    // 遇到 Token 过期自动刷新重签重试 (最多2次)
-    if ((ret.indexOf("TOKEN_EMPTY") >= 0 || ret.indexOf("TOKEN_EXPIRED") >= 0) && tries > 0 && newTk) {
-      console.log(`[淘金币] 检测到 Token 刷新: ${newTk.slice(0, 8)}... 正在重新生成 sign 校验...`);
+    if (/TOKEN_EMPTY|TOKEN_EXPIRED|ILLEGAL_ACCESS/i.test(ret) && tries > 0 && newTk) {
+      console.log(`[${NAME}] 令牌刷新 -> ${newTk.slice(0, 8)}... 重签重试`);
       return attempt(newTk, tries - 1);
     }
-
-    const ok = ret === "SUCCESS::调用成功" || ret.indexOf("SUCCESS") === 0;
-    return { ok, body: r.body, json: j, ret, cookie, status: r.status };
+    return { ok: /^SUCCESS/.test(ret), ret, body: r.body, json: j, cookie, status: r.status };
   }
 
   return attempt(mtopToken(cookie), 2);
 }
 
-/* ================= 3. 任务回放与结果判定 ================= */
-const NAME = "淘金币";
-const K_API = "tb_api";
-const K_COOKIE = "tb_cookie";
-const K_RESP = "tb_resp";
-
-function judge(r, apiName) {
-  const j = r.json;
+/* ================= 4. 结果判定 ================= */
+function judge(r, api) {
   const ret = String(r.ret || "");
+  const s = JSON.stringify(r.json || {});
 
-  if (/TOKEN_EMPTY|TOKEN_EXPIRED/.test(ret)) {
-    return { state: "nologin", text: "未提取到有效 mtop 令牌 (_m_h5_tk) → 请在淘宝 App 打开淘金币页面重新抓取" };
+  if (/TOKEN_EMPTY|TOKEN_EXPIRED/i.test(ret)) {
+    return { state: "nologin", text: "mtop 令牌无效 (_m_h5_tk)，请重新打开淘金币页" };
   }
-
-  if (/SUCCESS/.test(ret)) {
-    const s = JSON.stringify(j || {});
-    const num = s.match(/"(?:currentCoin|totalCoin|coinCount|currentCoins|coinNum|coin)"\s*:\s*"?(\d+)/i);
-    const extra = num ? ` | 🪙 当前金币: ${num[1]}` : "";
-
-    if (/已签|重复|REPEAT|already|ALREADY/.test(s)) {
-      return { state: "done", text: `今日已完成签到${extra}` };
+  if (/SESSION_EXPIRED|FAIL_SYS_SESSION|需要登录|未登录|USER_NOT_LOGIN/i.test(ret + s)) {
+    return { state: "nologin", text: `会话失效 (${ret.slice(0, 40)})，请重新登录淘宝并打开淘金币页` };
+  }
+  if (/^SUCCESS/.test(ret)) {
+    const num = s.match(/"(?:currentCoin|totalCoin|coinCount|currentCoins|coinNum|coin|amount|balance)"\s*:\s*"?(\d+)/i);
+    const gain = s.match(/"(?:awardCoin|reward|gainCoin|addCoin|signCoin|value)"\s*:\s*"?(\d+)/i);
+    const extra = (gain ? ` +${gain[1]}` : "") + (num ? ` | 🪙 余额 ${num[1]}` : "");
+    if (/已签|重复|REPEAT|already|ALREADY|SIGNED/i.test(s)) {
+      return { state: "done", text: `今日已签到${extra}` };
     }
-
-    // 如果只是普通查询接口，明确告知
-    if (/balance|assets|query|info|home/i.test(apiName) && !/sign|draw|award|receive/i.test(apiName)) {
-      return { state: "ok", text: `金币资产已同步${extra}\n(尚未锁定签到动作接口，请在淘宝点一次签到按钮)` };
+    if (/sign|checkin|signin|award|draw|receive|collect|claim/i.test(api)) {
+      return { state: "ok", text: `签到成功${extra}` };
     }
-
-    return { state: "ok", text: `${apiName} 执行成功${extra}` };
+    return { state: "ok", text: `${api} 调用成功${extra}\n(未锁定签到动作接口，请在淘金币页点一次签到)` };
   }
-
-  if (/FAIL_SYS_SESSION|SESSION_EXPIRED|需要登录|_bh=|未登录/i.test(ret) || /session/i.test(ret)) {
-    return { state: "nologin", text: `会话失效 (${ret.slice(0, 40)}) → 请重新打开淘宝淘金币刷新 Cookie` };
-  }
-
-  return { state: "fail", text: `响应: ${ret || (r.body ? r.body.slice(0, 80) : "空响应")}` };
+  return { state: "fail", text: `响应: ${ret || (r.body ? r.body.slice(0, 100) : "空")}` };
 }
 
+/* ================= 5. 主流程 ================= */
 async function main() {
-  const rawApi = $persistentStore.read(K_API);
-  let rec = {};
-  try { rec = JSON.parse(rawApi || "{}"); } catch (e) {}
-
-  // 1. 如果之前存了 getTimestamp 这种非业务接口，自动抹除
+  let rec = parseJSON($persistentStore.read(K_API) || "") || {};
   if (rec.api && /gettimestamp|getcity|unit\.get/i.test(rec.api)) {
-    console.log(`[${NAME}] 检测到垃圾时间戳接口: ${rec.api}，立即清除！`);
     $persistentStore.write("", K_API);
     rec = {};
   }
-
-  // 2. 检查是否有有效淘金币接口
   const cookie = $persistentStore.read(K_COOKIE) || "";
-  let targetApi = rec.api || "";
-  let targetVer = rec.ver || "1.0";
-  let payloadData = {};
-  try { payloadData = JSON.parse(String((rec.params && rec.params.data) || "{}")); } catch (e) {}
 
-  // 如果没有锁定有效接口，尝试使用淘金币经典候选接口探测
-  if (!targetApi || rec.rank < 2) {
-    if (!cookie.includes("_m_h5_tk")) {
-      const msg = "❌ 尚未捕获淘金币接口！\n💡 请在手机淘宝打开「领淘金币」，并手动点一下签到按钮自动抓取！";
-      console.log(`[${NAME}] ${msg}`);
-      $notification.post(NAME, "缺少淘金币接口", msg);
-      $done({ summary: msg });
-      return;
-    }
-    // 有 token 但没抓到 action，尝试候选接口
-    targetApi = "mtop.taobao.growth.aggregation.coin.signin";
-    targetVer = "1.0";
-    payloadData = { channel: "gold" };
-    console.log(`[${NAME}] 启用候选签到接口: ${targetApi}`);
+  if (!rec.api || !rec.url) {
+    const msg = "❌ 尚未捕获淘金币签到接口\n💡 在手机淘宝打开「领淘金币」并点一次签到，抓包会自动锁定";
+    $notification.post(NAME, "缺少签到模板", msg);
+    $done({ summary: msg });
+    return;
+  }
+  if (!cookie) {
+    const msg = "❌ 缺少 Cookie，请重新打开淘金币页";
+    $notification.post(NAME, "缺少 Cookie", msg);
+    $done({ summary: msg });
+    return;
   }
 
-  console.log(`[${NAME}] 开始执行: api=${targetApi}, cookie长度=${cookie.length}`);
+  console.log(`[${NAME}] 回放模板: ${rec.method} ${rec.api} v${rec.ver} rank=${rec.rank} cookie=${cookie.length}B tk=${!!mtopToken(cookie)}`);
 
-  const r = await mtopCall({
-    api: targetApi,
-    ver: targetVer,
-    data: payloadData,
-    cookie: cookie,
-    referer: (rec.params && rec.params.referer) || "https://market.m.taobao.com/app/tb-source-app/tz-wk/pages/main"
-  });
+  const r = await mtopReplay(rec, cookie);
+  console.log(`[${NAME}] ret=${r.ret} body=${String(r.body || "").slice(0, 200)}`);
+  $persistentStore.write(JSON.stringify({ api: rec.api, ret: r.ret, body: String(r.body || "").slice(0, 2000) }), K_RESP);
+  if (r.cookie && r.cookie !== cookie) $persistentStore.write(r.cookie, K_COOKIE);
 
-  console.log(`[${NAME}] 接口响应: ret=${r.ret}`);
-  $persistentStore.write(JSON.stringify({ api: targetApi, ret: r.ret, body: String(r.body || "").slice(0, 2000) }), K_RESP);
-
-  if (r.cookie && r.cookie !== cookie) {
-    $persistentStore.write(r.cookie, K_COOKIE);
-  }
-
-  const j = judge(r, targetApi);
+  const j = judge(r, rec.api);
   const titleMap = { ok: "签到完成", done: "今日已签过", nologin: "会话已失效", fail: "签到异常" };
-  const title = titleMap[j.state] || "任务结果";
-
-  console.log(`[${NAME}] 结论 -> ${title}: ${j.text}`);
-  $notification.post(NAME, title, `${j.text}\nAPI: ${targetApi}`);
+  $notification.post(NAME, titleMap[j.state] || "签到结果", `${j.text}\nAPI: ${rec.api}`);
   $done({ summary: j.text });
 }
 
@@ -265,8 +244,8 @@ if (typeof $httpClient === "undefined") {
   $done({ summary: "请在 Surge 环境中运行" });
 } else {
   main().catch((e) => {
-    console.log(`[${NAME}] 运行异常: ${e}`);
-    $notification.post(NAME, "脚本运行异常", String(e));
+    console.log(`[${NAME}] 异常: ${e}`);
+    $notification.post(NAME, "脚本异常", String(e));
     $done({ summary: `异常: ${e}` });
   });
 }
