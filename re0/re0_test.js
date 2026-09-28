@@ -8,6 +8,7 @@ const K_URL = "re0_url";
 const K_BODY = "re0_body";
 const K_ACT = "re0_action";
 const K_UA = "re0_ua";
+const K_CANDIDATES = "re0_candidate_actions";
 const K_TS = "re0_capture_time";
 
 const DEFAULT_HOME = "https://re0.me/";
@@ -34,6 +35,14 @@ function checkCf(status, headers, body) {
   return "";
 }
 
+function extractPoints(text) {
+  const m1 = text.match(/(?:获得|奖励|增加|\+)\s*(\d+)\s*(?:点数|积分|点|分)/i);
+  if (m1) return `+${m1[1]} 积分`;
+  const m2 = text.match(/"(?:points|reward|score|integral|coin|gain)"\s*:\s*"?(\d+)/i);
+  if (m2) return `+${m2[1]} 积分`;
+  return "";
+}
+
 function main() {
   console.log(`[${NAME}] ========== RE0 签到与盾墙实测体检开始 ==========`);
   const rows = [];
@@ -41,9 +50,11 @@ function main() {
   const cookie = $persistentStore.read(K_COOKIE) || "";
   const actId = $persistentStore.read(K_ACT) || "";
   const ua = $persistentStore.read(K_UA) || "";
-  const bodyPayload = $persistentStore.read(K_BODY) || "[false]";
   const capTime = $persistentStore.read(K_TS);
   const targetUrl = $persistentStore.read(K_URL) || DEFAULT_HOME;
+
+  let storedCandidates = [];
+  try { storedCandidates = JSON.parse($persistentStore.read(K_CANDIDATES) || "[]"); } catch (e) {}
 
   if (!cookie && !actId) {
     rows.push("❌ 未检测到任何凭据");
@@ -61,9 +72,12 @@ function main() {
   rows.push("🛡️ 盾墙与指纹准备:");
   rows.push(`  • cf_clearance: ${hasCf ? "✅ 已就绪" : "❌ 缺失 (需过 CF)"}`);
   rows.push(`  • UA 指纹: ${ua ? "✅ 真实 Safari" : "⚠️ 默认 UA"}`);
-  rows.push(`  • Action ID: ${actId ? "✅ " + actId.slice(0, 10) + "..." : "❌ 缺失"}`);
+  rows.push(`  • 当前主 Action ID: ${actId ? "✅ " + actId.slice(0, 10) + "..." : "❌ 缺失"}`);
+  if (storedCandidates.length) {
+    rows.push(`  • 候选 Action 库: ${storedCandidates.length} 个备选`);
+  }
 
-  // 发起实测 POST
+  // 发起实测试探
   let saved = {};
   try { saved = JSON.parse($persistentStore.read(K_HDR) || "{}"); } catch (e) {}
   const h = {};
@@ -88,7 +102,7 @@ function main() {
   $httpClient.post({
     url: targetUrl,
     headers: h,
-    body: bodyPayload
+    body: "[false]"
   }, (err, resp, resBody) => {
     if (err) {
       rows.push(`\n📡 连通测试: 失败 (${err})`);
@@ -115,11 +129,15 @@ function main() {
           if (m) resMsg = m[1];
         }
 
-        const ok = /签到成功|已签到|重复签到|明日再来|今日已签|已经签到|签到过了/.test(String(resBody || "")) ||
-                   /"success"\s*:\s*true/.test(String(resBody || ""));
+        const pts = extractPoints(resBody);
+        const ok = /(?:签到成功|已签到|重复签到|明日再来|今日已签|已经签到|签到过了)/.test(String(resBody || "")) ||
+                   (/"success"\s*:\s*true/.test(String(resBody || "")) && !/^\s*\d+:"\$/.test(String(resBody || "")));
 
         if (ok) {
-          rows.push(`  • 业务结果: ✅ ${resMsg || "签到成功/已签过"}`);
+          rows.push(`  • 业务结果: ✅ ${resMsg || "签到成功"}${pts ? " (" + pts + ")" : ""}`);
+        } else if (resBody.includes("$Sreact.fragment") || /^\s*\d+:"\$/.test(resBody)) {
+          rows.push("  • 业务结果: ⚠️ 返回页面渲染壳（Action ID 可能未对准签到按钮）");
+          rows.push("  • 建议: 在 Safari 网页内亲手点一下【每日签到】刷新 ID！");
         } else if (resMsg) {
           rows.push(`  • 业务提示: ⚠️ ${resMsg}`);
         } else {
