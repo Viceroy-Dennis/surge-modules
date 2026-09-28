@@ -153,6 +153,27 @@ function postJson(url, payload) {
   });
 }
 
+function putJson(url, payload) {
+  return new Promise((resolve) => {
+    $httpClient.put({
+      url: url,
+      headers: headersFor(url),
+      body: JSON.stringify(payload || {})
+    }, (error, response, body) => {
+      if (error) {
+        resolve({ url, status: 0, error: String(error), body: "" });
+      } else {
+        resolve({
+          url,
+          status: Number(response && (response.status || response.statusCode)) || 0,
+          error: "",
+          body: String(body || "")
+        });
+      }
+    });
+  });
+}
+
 function getJson(url) {
   return new Promise((resolve) => {
     $httpClient.get({
@@ -236,12 +257,35 @@ function claimable(t) {
 
 async function claimReward(taskId) {
   const confirmedUrl = $persistentStore.read(REWARD_URL_KEY) || "";
+  const confirmedMethod = $persistentStore.read("sgxh_confirmed_reward_method") || "POST";
+  const confirmedBody = $persistentStore.read("sgxh_confirmed_reward_body") || "";
 
-  // 1. 如果已有抓包确认的真实领奖 URL，直接调用
+  // 1. 如果已有抓包确认的真实领奖 URL，严格按抓到的方法与参数格式回放
   if (confirmedUrl) {
-    console.log(`[${NAME}] 使用已确认领奖端点: ${confirmedUrl}`);
-    const r = await postJson(confirmedUrl, { taskId: taskId });
-    return r;
+    let targetUrl = confirmedUrl;
+    let payload = {};
+
+    // 如果 URL 中包含数字 ID，用当前任务 ID 替换 (如 /getTaskBonus/1003 -> /getTaskBonus/{taskId})
+    targetUrl = targetUrl.replace(/\/\d+(\/?(\?|$))/, `/${taskId}$1`);
+
+    // 解析抓到的 Body 结构并替换任务 ID
+    try {
+      const bodyObj = JSON.parse(confirmedBody);
+      if (typeof bodyObj === "object") {
+        payload = bodyObj;
+        ["taskId", "task_id", "id", "taskCode"].forEach((k) => {
+          if (payload[k] !== undefined) payload[k] = taskId;
+        });
+      }
+    } catch (e) {
+      payload = { taskId: taskId };
+    }
+
+    console.log(`[${NAME}] 使用已确认领奖端点: ${confirmedMethod} ${targetUrl}`);
+    if (confirmedMethod === "PUT") {
+      return await putJson(targetUrl, payload);
+    }
+    return await postJson(targetUrl, payload);
   }
 
   // 2. 优先尝试 wxforum 官方端点 /api/shop/getTaskBonus/{id}
