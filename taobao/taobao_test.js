@@ -57,7 +57,8 @@ function main() {
     const rankDesc = { 3: "⭐⭐⭐ 核心签到接口 (Rank 3)", 2: "⭐⭐ 金币/资产接口 (Rank 2)" }[rec.rank] || `Rank ${rec.rank}`;
     rows.push(`  • 接口名: ✅ ${rec.api}`);
     rows.push(`  • 优先级: ${rankDesc}`);
-    rows.push(`  • 接口版本: v${rec.ver || "1.0"}`);
+    rows.push(`  • 接口版本: v${rec.ver || "1.0"} | 方法: ${rec.method || "GET"}`);
+    if (rec.params && rec.params.data) rows.push(`  • 回放参数: ${String(rec.params.data).slice(0, 80)}`);
   } else {
     rows.push("  • 接口名: ❌ 尚未锁定真正签到接口");
     rows.push("  • 动作指导: 请在手机淘宝打开「领淘金币」，并手动点一下签到按钮！");
