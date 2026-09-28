@@ -400,10 +400,16 @@ async function main() {
       }
     }
   } else {
-    // 兜底尝试针对今日核心任务执行官方 getTaskBonus 领奖 (1001 点赞, 1003 浏览, 1004 分享)
-    console.log(`[${NAME}] 正在尝试官方通道领奖...`);
-    for (const tid of ["1001", "1003", "1004", "3016"]) {
-      await claimReward(tid);
+    // 针对今日核心任务执行自动领奖 (1001 点赞, 1003 浏览, 1004 分享)
+    console.log(`[${NAME}] 正在尝试核心任务自动领奖...`);
+    const coreTasks = [
+      { id: "1001", name: "今日点赞10次" },
+      { id: "1003", name: "今日浏览帖子3次" },
+      { id: "1004", name: "今日分享帖子1次" }
+    ];
+    for (const t of coreTasks) {
+      const claimRes = await claimReward(t.id);
+      rows.push(result(`领取[${t.name}]`, claimRes));
       await sleep(100);
     }
   }
