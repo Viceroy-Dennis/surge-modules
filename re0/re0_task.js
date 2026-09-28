@@ -2,9 +2,9 @@
 // 专为穿透 Cloudflare 盾墙与 Next.js Server Action 体系设计：
 // 1. 直接回放动作 POST，避开触发 CF 挑战的首页与 JS 扫描
 // 2. 携带 Safari 真实 UA 与 cf_clearance，严格对齐浏览器指纹
-// 3. 自动识别 428 / 409 安全令牌，自动刷新重发
-// 4. 严谨的结果解析：提取具体积分奖励，坚决杜绝把页面渲染壳误判为“签到成功”！
-// 5. 组合容灾：依次遍历候选 Action ID 与路由组合，真实成功才宣告完成
+// 3. 严格按需刷新令牌：仅在 428/409 时换令牌重试，绝不在 200 参数错误时无谓重试
+// 4. 严谨的结果解析：精确提取具体积分点数，坚决杜绝页面壳假成功
+// 5. 快速容灾轮询：单次流程控制在 2 秒内，遇参数错误秒切候选 ID，杜绝 Surge 5s 超时
 
 const NAME = "RE0签到";
 const K_COOKIE = "re0_cookie";
@@ -113,7 +113,7 @@ function parseResponse(status, headers, raw) {
   return { ok, status, code, msg, raw: text, headers: headers || {}, pageFlight, idExpired, points };
 }
 
-function buildHeaders(targetUrl, actId, useTree) {
+function buildHeaders(targetUrl, actId) {
   let saved = {};
   try {
     saved = JSON.parse($persistentStore.read(K_HDR) || "{}");
@@ -138,12 +138,6 @@ function buildHeaders(targetUrl, actId, useTree) {
   h["cookie"] = cookie;
   h["x-surge-task"] = "1"; // 防回环
   if (actId) h["next-action"] = actId;
-
-  if (!useTree) {
-    delete h["next-router-state-tree"];
-  } else if (saved["next-router-state-tree"]) {
-    h["next-router-state-tree"] = saved["next-router-state-tree"];
-  }
 
   return { headers: h, ua, cookie };
 }
@@ -176,12 +170,12 @@ function rawSend(url, headers, body) {
   });
 }
 
-async function sendAction(url, actId, bodyPayload, useTree) {
-  const { headers, cookie } = buildHeaders(url, actId, useTree);
+async function sendAction(url, actId, bodyPayload) {
+  const { headers, cookie } = buildHeaders(url, actId);
 
   // 1. 发起请求
   let res = await rawSend(url, headers, bodyPayload);
-  console.log(`[${NAME}] POST (act=${actId.slice(0, 8)}..., tree=${useTree ? 1 : 0}): HTTP ${res.status}, ok=${res.ok}, msg=${res.msg || (res.raw ? res.raw.slice(0, 60).replace(/[\r\n]+/g, " ") : "空")}`);
+  console.log(`[${NAME}] POST (act=${actId.slice(0, 8)}..., body=${bodyPayload}): HTTP ${res.status}, ok=${res.ok}, msg=${res.msg || (res.raw ? res.raw.slice(0, 60).replace(/[\r\n]+/g, " ") : "空")}`);
 
   // 2. 检查 Cloudflare 盾墙拦截
   const cf = checkCfChallenge(res.status, res.headers, res.raw);
@@ -191,15 +185,26 @@ async function sendAction(url, actId, bodyPayload, useTree) {
     return res;
   }
 
-  // 3. 检查安全令牌刷新 (428 / 409 / action_token_required)
+  // 3. 严格按需令牌刷新：仅在 428 / 409 / 安全验证拦截时重发，绝不在普通的 200 参数错误时盲目重发！
   const newToken = extractHdhToken(res.headers);
   if (newToken) {
-    console.log(`[${NAME}] 检测到新的 hdh_sa_token，自动换令牌重发...`);
     const freshCookie = putCookie(cookie, "hdh_sa_token", newToken);
     $persistentStore.write(freshCookie, K_COOKIE);
     headers.cookie = freshCookie;
-    res = await rawSend(url, headers, bodyPayload);
-    console.log(`[${NAME}] 换令牌重试结果: HTTP ${res.status}, ok=${res.ok}, msg=${res.msg || "完成"}`);
+
+    const needResend = (
+      res.status === 428 ||
+      res.status === 409 ||
+      res.code === "action_token_required" ||
+      res.code === "action_token_invalid" ||
+      /安全验证|token_required|token_invalid/i.test(res.msg || "")
+    );
+
+    if (needResend) {
+      console.log(`[${NAME}] 检测到安全验证拦截 (HTTP ${res.status})，自动换令牌重发...`);
+      res = await rawSend(url, headers, bodyPayload);
+      console.log(`[${NAME}] 换令牌重试结果: HTTP ${res.status}, ok=${res.ok}, msg=${res.msg || "完成"}`);
+    }
   }
 
   return res;
@@ -211,6 +216,7 @@ async function main() {
   const cookie = $persistentStore.read(K_COOKIE) || "";
   const primaryAct = $persistentStore.read(K_ACT) || "";
   const capturedUrl = $persistentStore.read(K_URL) || DEFAULT_HOME;
+  const capturedBody = $persistentStore.read(K_BODY) || "";
 
   if (!cookie) {
     const msg = "未找到 Cookie，请用 Safari 登录 re0.me 并点一次签到";
@@ -219,18 +225,22 @@ async function main() {
     return;
   }
 
-  // 收集候选 Action ID 列表
+  // 收集候选 Action ID 列表（严格去除前后空格与重复）
   let storedCandidates = [];
   try { storedCandidates = JSON.parse($persistentStore.read(K_CANDIDATES) || "[]"); } catch (e) {}
+
+  const defaults = [
+    "607756f296316ef5449089aa14bc8b832b4b455b",
+    "4080a19f61b033d52674e2d36d814ec9786a3473",
+    "40f972f3a8cf85e02707086ff7d726851fec314e39"
+  ];
 
   const candidateIds = [
     primaryAct,
     ...storedCandidates,
-    "6060d7aa71c4c96570d5e23630f9a2e379b32b84",
-    "607756f296316ef5449089aa14bc8b832b4b455b",
-    "4080a19f61b033d52674e2d36d814ec9786a3473",
-    "40f972f3a8cf85e02707086ff7d726851fec314e39"
-  ].filter((id, idx, arr) => id && id.length >= 20 && arr.indexOf(id) === idx);
+    ...defaults
+  ].map(x => String(x || '').trim().toLowerCase())
+   .filter((id, idx, arr) => id && id.length >= 20 && arr.indexOf(id) === idx);
 
   if (!candidateIds.length) {
     const msg = "未找到 Action ID，请用 Safari 打开 re0.me 并在页面内手动点一次签到";
@@ -239,46 +249,46 @@ async function main() {
     return;
   }
 
-  console.log(`[${NAME}] 准备执行签到，候选 Action ID 池: ${candidateIds.map(x => x.slice(0, 8)).join(", ")}`);
+  console.log(`[${NAME}] 候选 Action ID 池: ${candidateIds.map(x => x.slice(0, 8)).join(", ")}`);
 
-  // 构造路由组合 (优先抓包 URL，次选根路径；优先不带 state-tree，次选带 state-tree)
-  const targetUrls = [capturedUrl];
-  if (!targetUrls.includes(DEFAULT_HOME)) targetUrls.push(DEFAULT_HOME);
-
-  const combos = [];
-  for (const act of candidateIds) {
-    for (const u of targetUrls) {
-      combos.push({ act, url: u, tree: false });
-      combos.push({ act, url: u, tree: true });
-    }
+  // 确定请求参数策略
+  let bodiesToTry = ["[false]", "[]"];
+  if (capturedBody && (capturedBody.startsWith("[") || capturedBody.startsWith("{"))) {
+    bodiesToTry = [capturedBody, "[false]", "[]"].filter((b, idx, arr) => arr.indexOf(b) === idx);
   }
 
   let finalRes = null;
   let successAct = "";
 
-  for (let i = 0; i < combos.length; i++) {
-    const c = combos[i];
-    console.log(`[${NAME}] 尝试组合 [${i + 1}/${combos.length}]: act=${c.act.slice(0, 8)}... tree=${c.tree ? 1 : 0}`);
-    const res = await sendAction(c.url, c.act, "[false]", c.tree);
+  for (let i = 0; i < candidateIds.length; i++) {
+    const act = candidateIds[i];
+    console.log(`[${NAME}] 尝试第 ${i + 1}/${candidateIds.length} 个 Action ID (${act.slice(0, 8)}...)...`);
 
-    if (res.cfBlocked) {
-      const cfMsg = "❌ Cloudflare 盾墙拦截 (cf_clearance 过期)\n💡 请用 Safari 打开一次 re0.me 刷新人机验证，再运行任务！";
-      $notification.post(NAME, "盾墙拦截 (需过 CF 验证)", cfMsg);
-      $done({ summary: cfMsg });
-      return;
-    }
+    for (const bodyStr of bodiesToTry) {
+      const res = await sendAction(capturedUrl, act, bodyStr);
 
-    if (res.ok) {
+      if (res.cfBlocked) {
+        const cfMsg = "❌ Cloudflare 盾墙拦截 (cf_clearance 过期)\n💡 请用 Safari 打开一次 re0.me 刷新人机验证，再运行任务！";
+        $notification.post(NAME, "盾墙拦截 (需过 CF 验证)", cfMsg);
+        $done({ summary: cfMsg });
+        return;
+      }
+
+      if (res.ok) {
+        finalRes = res;
+        successAct = act;
+        $persistentStore.write(act, K_ACT); // 锁存成功 Action ID
+        console.log(`[${NAME}] 🎉 签到成功！锁存 Action ID: ${act} (body=${bodyStr})`);
+        break;
+      }
+
       finalRes = res;
-      successAct = c.act;
-      $persistentStore.write(c.act, K_ACT); // 锁存成功 Action ID
-      console.log(`[${NAME}] 🎉 签到成功锁存 Action ID: ${c.act}`);
-      break;
+      // 如果报参数错误，继续用下一个 bodyStr 尝试同一个 action；如果报别的错误直接切下一个 action
+      if (!res.msg.includes("请求参数错误")) break;
     }
 
-    finalRes = res;
-    // 如果返回页面壳，继续尝试下一个组合，绝不提前误报成功
-    if (i < combos.length - 1) await sleep(300);
+    if (finalRes && finalRes.ok) break;
+    if (i < candidateIds.length - 1) await sleep(150);
   }
 
   // 最终结论呈现
@@ -291,7 +301,7 @@ async function main() {
   } else {
     notifyTitle = "签到未达成";
     const serverEcho = finalRes ? (finalRes.msg || (finalRes.raw ? finalRes.raw.slice(0, 80).replace(/[\r\n]+/g, " ") : `HTTP ${finalRes.status}`)) : "无响应";
-    notifyBody = `状态: ${serverEcho}\n💡 所有候选 Action ID 均未生效，请在 Safari 打开 re0.me 并在页面内手动点一次【签到】更新 Action ID！`;
+    notifyBody = `状态: ${serverEcho}\n💡 所有候选 Action ID 均未生效，请在 Safari 打开 re0.me 并在页面内手动点一次【签到】刷新 Action ID！`;
   }
 
   console.log(`[${NAME}] 最终结论 -> ${notifyTitle}: ${notifyBody}`);
