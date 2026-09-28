@@ -1,18 +1,18 @@
 #!name=淘金币每日任务
-#!desc=手机淘宝淘金币每日自动签到。自动捕获并学习 mtop 签到接口与会话 Cookie，通过原生纯 JS MD5 计算动态签名与 Token 续签舞步。每天 09:18 自动签到，自带体检与手动测试入口。
+#!desc=手机淘宝淘金币每日全自动：签到 + 任务面板浏览类任务自动上报完成 + 自动领取全部任务奖励 + 余额汇总。抓包学习签到/任务列表/完成上报/领奖四类 mtop 接口模板后完整回放，纯 JS MD5 动态签名，令牌自动续期。每天 09:18 执行，自带体检与手动入口。
 #!arguments=capture:淘金币抓包
-#!arguments-desc=Cookie 抓包默认开启（参数值即脚本名）。在手机淘宝打开「淘金币」页面点一次签到即可自动捕获接口与凭据；锁定成功后把参数改成 # 即可关闭抓包。
+#!arguments-desc=抓包默认开启（参数值即脚本名）。在手机淘宝打开「领淘金币」任务面板：点一次签到、点一个「去完成」、点一个「领取奖励」即可锁定四类接口；锁定后把参数改成 # 可关闭抓包。
 #!category=自动任务
 
 [Script]
-# 1. 淘金币接口与凭据抓包 (全域监听 *.m.taobao.com，捕获成功即时弹窗)
+# 1. 淘金币接口模板抓包 (全域监听 *.m.taobao.com mtop，按签到/列表/完成/领奖分类入池)
 {{{capture}}} = type=http-request,pattern=^https:\/\/[^/]*\.m\.taobao\.com\/,requires-body=true,max-size=262144,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/taobao/taobao_capture.js,script-update-interval=0
 
-# 2. 定时自动签到任务 (每天 09:18 自动执行)
-淘金币自动签到 = type=cron,cronexp=18 9 * * *,timeout=60,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/taobao/taobao_task.js,script-update-interval=0
+# 2. 定时全自动任务 (每天 09:18：签到 → 浏览任务 → 领奖 → 余额)
+淘金币自动任务 = type=cron,cronexp=18 9 * * *,timeout=180,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/taobao/taobao_task.js,script-update-interval=0
 
 # 3. 手动执行与体检入口 (在 Surge 脚本列表直接点击)
-淘金币手动执行 = type=generic,timeout=60,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/taobao/taobao_task.js,script-update-interval=0
+淘金币手动执行 = type=generic,timeout=180,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/taobao/taobao_task.js,script-update-interval=0
 淘金币体检测试 = type=generic,timeout=60,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/taobao/taobao_test.js,script-update-interval=0
 
 [MITM]
