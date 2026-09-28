@@ -1,8 +1,7 @@
 // 三国咸话 —— Surge 登录凭据抓包脚本 (http-request)
-// 彻底解决 Token 互相覆盖的根因：双通道独立存储
-// 1. wxforum 签到通道 -> 存入 sgxh_token_wx 与 sgxh_headers_wx (HS256 算法)
-// 2. api-xh 社区/任务通道 -> 存入 sgxh_token_xh 与 sgxh_headers_xh (RS256 算法)
-// 互不覆盖，永不污染！
+// 1. 双通道隔离：wxforum (HS256) 与 api-xh (RS256) 完全独立存储，绝不互相覆盖
+// 2. 智能领奖嗅探：捕获用户在小程序内点击【领取】时的真实接口 URL、Method、Body
+// 3. 全流程可视化：只要是 POST 或 PUT 动作全部打印到日志，方便精准排查
 
 const NAME = "三国咸话";
 const TOKEN_WX_KEY = "sgxh_token_wx";
@@ -11,6 +10,8 @@ const TOKEN_XH_KEY = "sgxh_token_xh";
 const HDR_XH_KEY = "sgxh_headers_xh";
 const COOKIE_KEY = "sgxh_cookie";
 const REWARD_URL_KEY = "sgxh_confirmed_reward_url";
+const REWARD_METHOD_KEY = "sgxh_confirmed_reward_method";
+const REWARD_BODY_KEY = "sgxh_confirmed_reward_body";
 
 // 兼容旧键
 const TOKEN_KEY = "sgxh_token";
@@ -62,16 +63,22 @@ try {
       const method = String($request.method || "GET").toUpperCase();
       const bodyStr = String($request.body || "");
 
-      // 核心侦听：如果在小程序内点了【领取】或其他 POST 领奖动作
-      if (method === "POST" && !url.includes("updateTaskProgress") && !url.includes("signIn") && !url.includes("openMiniApp") && !url.includes("likes")) {
-        console.log(`[${NAME}] 捕获 POST 请求: ${url} body=${bodyStr}`);
-        if (/task|reward|receive|claim|award|bonus|get|draw/i.test(url) || /taskId|task_id|bonus/i.test(bodyStr)) {
+      // 核心侦听：捕获用户在小程序内点击【领取】时的真实动作
+      const isAction = method === "POST" || method === "PUT";
+      const isKnownAction = /updateTaskProgress|signIn|openMiniApp|likes|share|topics\/\d+\/replies/i.test(url);
+
+      if (isAction && !isKnownAction) {
+        console.log(`[${NAME}] 捕获动作请求: ${method} ${url} body=${bodyStr.slice(0, 100)}`);
+        // 匹配领奖特征：URL 或 Body 中包含 task、reward、receive、bonus 等关键字
+        if (/task|reward|receive|claim|award|bonus|draw|get/i.test(url) || /taskId|task_id|bonus|award/i.test(bodyStr)) {
           $persistentStore.write(url, REWARD_URL_KEY);
-          console.log(`[${NAME}] 🎯 成功捕获真实领奖接口: ${url}`);
+          $persistentStore.write(method, REWARD_METHOD_KEY);
+          $persistentStore.write(bodyStr, REWARD_BODY_KEY);
+          console.log(`[${NAME}] 🎯 成功锁定真实领奖接口: ${method} ${url}`);
           $notification.post(
             NAME,
             "🎯 真实领奖接口已锁定！",
-            `接口: ${url.replace(/^https?:\/\/[^/]+/i, "")}\n参数: ${bodyStr.slice(0, 100)}\n后续自动调用此接口领奖！`
+            `接口: ${method} ${url.replace(/^https?:\/\/[^/]+/i, "")}\n参数: ${bodyStr.slice(0, 80) || "(空)"}`
           );
         }
       }
@@ -102,7 +109,7 @@ try {
           $persistentStore.write(tok, TOKEN_XH_KEY);
           $persistentStore.write(JSON.stringify(saved), HDR_XH_KEY);
           $persistentStore.write(String(Date.now()), TIME_KEY);
-          console.log(`[${NAME}] 捕获到【社区/任务 api-xh】核心凭据: ${tok.slice(0, 10)}...`);
+          console.log(`[${NAME}] 捕获【社区/任务 api-xh】凭据: ${tok.slice(0, 10)}...`);
 
           if (tok !== oldXh) {
             $notification.post(NAME, "社区任务凭据已锁定 🎯", `通道: api-xh (浏览/任务)\nToken 长度: ${tok.length} 位`);
@@ -112,7 +119,7 @@ try {
           $persistentStore.write(tok, TOKEN_WX_KEY);
           $persistentStore.write(JSON.stringify(saved), HDR_WX_KEY);
           $persistentStore.write(String(Date.now()), TIME_KEY);
-          console.log(`[${NAME}] 捕获到【签到 wxforum】凭据: ${tok.slice(0, 10)}...`);
+          console.log(`[${NAME}] 捕获【签到 wxforum】凭据: ${tok.slice(0, 10)}...`);
 
           if (tok !== oldWx) {
             $notification.post(NAME, "签到凭据已更新 ✅", `通道: wxforum (签到)\nToken 长度: ${tok.length} 位`);
