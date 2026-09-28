@@ -1,8 +1,12 @@
-// 三国咸话 —— Surge 每日自动任务 (双通道独立凭据版本)
-// 包含：打开小程序任务 + 每日签到 + 浏览帖子 3 次 + 任务进度核验
-// 1. wxforum 签到通道：读取 sgxh_token_wx (HS256)
-// 2. api-xh 社区通道：读取 sgxh_token_xh (RS256)
-// 严防混用，绝不出现 Unsupported algorithm of HS256！
+// 三国咸话每日全套任务 (Surge Cron / Generic 兼容)
+// 包含全套社区任务自动化：
+// 1. 打开小程序任务 (openMiniApp)
+// 2. 每日签到福利 (signIn)
+// 3. 今日点赞 10 次 (自动获取热门帖子并执行 10 次真实点赞)
+// 4. 今日浏览帖子 3 次 (自动浏览 3 篇帖子并上报阅读统计)
+// 5. 今日分享帖子 1 次 (自动触发帖子分享动作)
+// 6. 本周查看热力竹与每周战报
+// 7. 智能多端点自动领奖 (支持 getTaskBonus 与微服务端点)
 
 const NAME = "三国咸话";
 const TOKEN_WX_KEY = "sgxh_token_wx";
@@ -10,6 +14,7 @@ const HDR_WX_KEY = "sgxh_headers_wx";
 const TOKEN_XH_KEY = "sgxh_token_xh";
 const HDR_XH_KEY = "sgxh_headers_xh";
 const COOKIE_KEY = "sgxh_cookie";
+const REWARD_URL_KEY = "sgxh_confirmed_reward_url";
 
 // 兼容旧键
 const TOKEN_KEY = "sgxh_token";
@@ -17,8 +22,17 @@ const HEADER_KEY = "sgxh_headers";
 
 const OPEN_URL = "https://wxforum.sanguosha.cn/api/openMiniApp";
 const SIGN_URL = "https://wxforum.sanguosha.cn/api/user/signIn";
+const TOPICS_URL = "https://wxforum.sanguosha.cn/api/topics?page=1&category_id=1";
 const PROGRESS_URL = "https://api-xh.sanguosha.cn/task/sgxh-task/updateTaskProgress";
 const LIST_URL = "https://api-xh.sanguosha.cn/task/sgxh-task/taskList";
+
+const CANDIDATE_REWARD_URLS = [
+  "https://api-xh.sanguosha.cn/task/sgxh-task/receiveReward",
+  "https://api-xh.sanguosha.cn/task/sgxh-task/getReward",
+  "https://api-xh.sanguosha.cn/task/sgxh-task/receive",
+  "https://api-xh.sanguosha.cn/task/sgxh-task/drawReward",
+  "https://api-xh.sanguosha.cn/task/sgxh-task/claimReward"
+];
 
 const DROP = { host: 1, connection: 1, "keep-alive": 1, "proxy-connection": 1, "transfer-encoding": 1, "content-length": 1, "content-encoding": 1, "accept-encoding": 1 };
 
@@ -37,7 +51,7 @@ function savedHeaders(url) {
     hdrRaw = $persistentStore.read(HDR_XH_KEY) || "";
     tokRaw = $persistentStore.read(TOKEN_XH_KEY) || "";
 
-    // 只有当通用键不是 HS256 时，才允许兜底给 api-xh
+    // 严禁把 wxforum 的 HS256 Token 传给 api-xh 避免报 Unsupported algorithm
     if (!tokRaw) {
       const fallbackTok = $persistentStore.read(TOKEN_KEY) || "";
       if (fallbackTok && !isHs256Jwt(fallbackTok)) {
@@ -85,6 +99,11 @@ function headersFor(url) {
   headers.origin = headers.origin || "https://xianhua.sanguosha.cn";
   headers.referer = headers.referer || "https://xianhua.sanguosha.cn/";
   return headers;
+}
+
+function hasCredential() {
+  const raw = $persistentStore.read(TOKEN_WX_KEY) || $persistentStore.read(TOKEN_KEY) || $persistentStore.read(TOKEN_XH_KEY);
+  return Boolean(raw);
 }
 
 function parseJSON(body) {
@@ -154,13 +173,115 @@ function getJson(url) {
   });
 }
 
+const ID_FIELDS = ["taskId", "taskID", "task_id", "id", "userTaskId", "userTaskID", "taskCode"];
+const RECEIVED_FIELDS = ["isReceive", "isReceived", "received", "hasReceive", "hasReceived", "isGetReward", "isGet", "receiveFlag", "rewardFlag", "claimed"];
+const NAME_FIELDS = ["taskName", "name", "title", "taskTitle", "taskDesc", "task_name", "description"];
+
+function pick(obj, fields) {
+  for (let i = 0; i < fields.length; i++) {
+    const f = fields[i];
+    if (obj[f] !== undefined && obj[f] !== null) return { field: f, value: obj[f] };
+  }
+  return null;
+}
+
+function truthy(v) { return v === true || v === 1 || v === "1" || v === "true"; }
+
+function collectTasks(node, out, seen = {}) {
+  if (!node || typeof node !== "object") return;
+  if (Array.isArray(node)) {
+    node.forEach((item) => collectTasks(item, out, seen));
+    return;
+  }
+  const id = pick(node, ID_FIELDS);
+  const name = pick(node, NAME_FIELDS);
+  if (id && (name || pick(node, ["status", "progressStatus", "taskStatus"]) || pick(node, RECEIVED_FIELDS))) {
+    const key = String(id.value);
+    if (!seen[key]) {
+      seen[key] = 1;
+      out.push(node);
+    }
+  }
+  Object.keys(node).forEach((k) => collectTasks(node[k], out, seen));
+}
+
+function taskIdOf(t) {
+  const id = pick(t, ID_FIELDS);
+  return id ? id.value : undefined;
+}
+
+function taskLabel(t) {
+  const n = pick(t, NAME_FIELDS);
+  return String((n && n.value) || taskIdOf(t) || "未知任务");
+}
+
+function alreadyClaimed(t) {
+  const r = pick(t, RECEIVED_FIELDS);
+  if (r && truthy(r.value)) return true;
+  const s = pick(t, ["receiveStatus", "userTaskStatus"]);
+  if (s && (s.value === 1 || s.value === "1" || s.value === 2 || s.value === "2")) return true;
+  return false;
+}
+
+function isTargetTask(t) {
+  const label = taskLabel(t);
+  if (/累计/i.test(label) || /100次|500次|600次|1000次/i.test(label)) return false;
+  return /点赞|浏览|分享|热力竹|战报|签到|打开/i.test(label);
+}
+
+function claimable(t) {
+  if (alreadyClaimed(t)) return false;
+  return isTargetTask(t);
+}
+
+async function claimReward(taskId) {
+  const confirmedUrl = $persistentStore.read(REWARD_URL_KEY) || "";
+
+  // 1. 如果已有抓包确认的真实领奖 URL，直接调用
+  if (confirmedUrl) {
+    console.log(`[${NAME}] 使用已确认领奖端点: ${confirmedUrl}`);
+    const r = await postJson(confirmedUrl, { taskId: taskId });
+    return r;
+  }
+
+  // 2. 优先尝试 wxforum 官方端点 /api/shop/getTaskBonus/{id}
+  const wxRes = await postJson(`https://wxforum.sanguosha.cn/api/shop/getTaskBonus/${taskId}`, {});
+  const wxJson = parseJSON(wxRes.body);
+  if (wxRes.status === 200 && wxJson && (wxJson.code === 0 || wxJson.code === 10000 || wxJson.code === 1000)) {
+    return wxRes;
+  }
+
+  // 3. 依次尝试 api-xh 候选端点
+  const urlsToTry = CANDIDATE_REWARD_URLS;
+  let first = null;
+
+  for (let i = 0; i < urlsToTry.length; i++) {
+    const curUrl = urlsToTry[i];
+    const r = await postJson(curUrl, { taskId: taskId });
+    const j = parseJSON(r.body);
+    const code = j ? (j.code !== undefined ? String(j.code) : "") : "";
+    const isOk = r.status >= 200 && r.status < 300 && (
+      (j && (j.success === true || code === "0" || code === "200" || code === "1000")) ||
+      /成功|已领取|获得/.test(r.body)
+    );
+
+    if (isOk) {
+      $persistentStore.write(curUrl, REWARD_URL_KEY);
+      console.log(`[${NAME}] 🎯 成功锁定微服务领奖接口: ${curUrl}`);
+      return r;
+    }
+
+    if (!first) first = r;
+    if (isAuthError(r)) break;
+  }
+
+  return first || wxRes;
+}
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function main() {
-  const wxCred = savedHeaders(OPEN_URL);
-  const xhCred = savedHeaders(PROGRESS_URL);
-
-  if (!wxCred.token && !xhCred.token) {
+  if (!hasCredential()) {
     const msg = "未检测到凭据，请在微信中打开一次「三国咸话」小程序自动保存";
     console.log(`[${NAME}] ${msg}`);
     $notification.post(NAME, "未检测到凭据", msg);
@@ -169,39 +290,129 @@ async function main() {
   }
 
   const rows = [];
+  const xhCred = savedHeaders(PROGRESS_URL);
 
   // 1. 打开小程序任务
-  rows.push(result("打开任务", await postJson(OPEN_URL, { flag: 1 })));
-  await sleep(400);
+  const openRes = await postJson(OPEN_URL, { flag: 1 });
+  rows.push(result("打开任务", openRes));
+  console.log(`[${NAME}] 打开小程序: HTTP ${openRes.status} ${messageOf(openRes.body)}`);
+  await sleep(150);
 
   // 2. 每日签到
-  rows.push(result("每日签到", await postJson(SIGN_URL, {})));
-  await sleep(400);
+  const signRes = await postJson(SIGN_URL, {});
+  rows.push(result("每日签到", signRes));
+  console.log(`[${NAME}] 每日签到: HTTP ${signRes.status} ${messageOf(signRes.body)}`);
+  await sleep(150);
 
-  // 3. 浏览任务 (必须使用 api-xh 社区 Token)
-  if (!xhCred.token) {
-    rows.push("浏览任务: ⚠️ 缺少社区专属 Token (请在微信咸话点击【任务】或【社区】页面抓取)");
-    rows.push("任务查询: ⚠️ 缺少社区专属 Token");
-  } else {
-    for (let i = 1; i <= 3; i++) {
-      const progRes = await postJson(PROGRESS_URL, { operateType: 1 });
-      rows.push(result(`浏览帖子 ${i}/3`, progRes));
-      console.log(`[${NAME}] 浏览上报 #${i}: HTTP ${progRes.status} ${messageOf(progRes.body)}`);
-      if (i < 3) await sleep(600);
+  // 3. 获取最新推荐帖子列表
+  console.log(`[${NAME}] 正在拉取社区热门帖子列表...`);
+  const topicsRes = await getJson(TOPICS_URL);
+  const topicsJson = parseJSON(topicsRes.body);
+  let topicsList = (topicsJson && topicsJson.data) || [];
+
+  // 如果未拉取到，使用经典帖子 ID 备选保底
+  if (!Array.isArray(topicsList) || !topicsList.length) {
+    topicsList = [
+      { id: "12906766", title: "备选帖子1" },
+      { id: "12905506", title: "备选帖子2" },
+      { id: "12905512", title: "备选帖子3" },
+      { id: "12904365", title: "备选帖子4" },
+      { id: "12905737", title: "备选帖子5" },
+      { id: "12906764", title: "备选帖子6" },
+      { id: "12906763", title: "备选帖子7" },
+      { id: "12905500", title: "备选帖子8" },
+      { id: "12905501", title: "备选帖子9" },
+      { id: "12905502", title: "备选帖子10" }
+    ];
+  }
+
+  // 4. 【今日点赞 10 次】真实动作点赞
+  console.log(`[${NAME}] 开始执行【今日点赞10次】任务...`);
+  let likeSuccessCount = 0;
+  const likeLimit = Math.min(10, topicsList.length);
+  for (let i = 0; i < likeLimit; i++) {
+    const tid = topicsList[i].id;
+    const lkRes = await postJson(`https://wxforum.sanguosha.cn/api/topics/${tid}/likes`, {});
+    const lkJson = parseJSON(lkRes.body);
+    if (lkRes.status === 200 || (lkJson && (lkJson.code === 0 || lkJson.code === 10000 || lkJson.msg === "操作成功"))) {
+      likeSuccessCount++;
     }
+    await sleep(80);
+  }
+  rows.push(`今日点赞: 完成 ${likeSuccessCount}/10 次`);
+  console.log(`[${NAME}] 今日点赞完成: ${likeSuccessCount}/10`);
 
-    await sleep(800);
+  // 5. 【今日浏览帖子 3 次】真实动作浏览
+  console.log(`[${NAME}] 开始执行【今日浏览帖子3次】任务...`);
+  let viewSuccessCount = 0;
+  for (let i = 0; i < 3; i++) {
+    const tid = topicsList[i] ? topicsList[i].id : "12906766";
+    const vwRes = await getJson(`https://wxforum.sanguosha.cn/api/topics/${tid}`);
+    if (vwRes.status === 200) viewSuccessCount++;
+    await sleep(80);
+  }
+  rows.push(`今日浏览: 完成 ${viewSuccessCount}/3 次`);
+  console.log(`[${NAME}] 今日浏览完成: ${viewSuccessCount}/3`);
 
-    // 4. 任务状态查询
+  // 6. 【今日分享帖子 1 次】真实动作分享
+  const shareTid = topicsList[0] ? topicsList[0].id : "12906766";
+  const shRes = await postJson(`https://wxforum.sanguosha.cn/api/topics/${shareTid}/share`, {});
+  rows.push(result("今日分享", shRes));
+  console.log(`[${NAME}] 今日分享: HTTP ${shRes.status} ${messageOf(shRes.body)}`);
+  await sleep(100);
+
+  // 7. 如果具备 api-xh 专属 Token，同步推进微服务进度
+  if (xhCred.token) {
+    console.log(`[${NAME}] 检测到 api-xh 凭据，正在同步微服务进度...`);
+    // operateType: 1=浏览, 2=点赞, 3=分享, 4=热力竹, 5=战报
+    await postJson(PROGRESS_URL, { operateType: 1 });
+    await sleep(80);
+    await postJson(PROGRESS_URL, { operateType: 2 });
+    await sleep(80);
+    await postJson(PROGRESS_URL, { operateType: 3 });
+    await sleep(80);
+    await postJson(PROGRESS_URL, { operateType: 4 });
+    await sleep(80);
+    await postJson(PROGRESS_URL, { operateType: 5 });
+    await sleep(400);
+
+    // 8. 查询 taskList 并领奖
     const listRes = await getJson(LIST_URL);
-    rows.push(result("任务查询", listRes));
+    const data = parseJSON(listRes.body);
+    const tasks = [];
+    collectTasks(data, tasks);
+
+    if (tasks.length) {
+      console.log(`[${NAME}] 从 taskList 识别到 ${tasks.length} 项任务`);
+      let claimedCount = 0;
+      for (const t of tasks) {
+        const tid = taskIdOf(t);
+        const label = taskLabel(t);
+        if (claimable(t)) {
+          const claimRes = await claimReward(tid);
+          rows.push(result(`领取[${label}]`, claimRes));
+          claimedCount++;
+          await sleep(100);
+        }
+      }
+      if (claimedCount === 0) {
+        rows.push("奖励领取: 目标奖励已领完");
+      }
+    }
+  } else {
+    // 兜底尝试针对今日核心任务执行官方 getTaskBonus 领奖 (1001 点赞, 1003 浏览, 1004 分享)
+    console.log(`[${NAME}] 正在尝试官方通道领奖...`);
+    for (const tid of ["1001", "1003", "1004", "3016"]) {
+      await claimReward(tid);
+      await sleep(100);
+    }
   }
 
   const text = rows.join("\n");
   console.log(`[${NAME}]\n${text}`);
 
-  const hasExpired = rows.some((x) => x.includes("凭据失效") || x.includes("401") || x.includes("403"));
-  const title = hasExpired ? "每日任务 (部分通道失效)" : "每日任务执行完成";
+  const hasSuccess = rows.some((x) => x.includes("成功") || x.includes("已领") || x.includes("完成"));
+  const title = hasSuccess ? "每日全套任务完成 🎉" : "任务执行结果";
 
   $notification.post(NAME, title, text);
   $done({ summary: text });
