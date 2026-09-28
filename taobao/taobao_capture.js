@@ -1,15 +1,19 @@
-// 淘宝淘金币 —— Surge 抓包脚本 v2 (http-request, requires-body=true)
-// 核心：完整记录用户手动点击「签到」时的 mtop 请求（URL + Headers + Body），供任务脚本重签回放。
-// 分级：rank3 = api 名含 sign/checkin/signin/award/draw/receive（真正动作）
-//       rank2 = 含 coin/jinbi/gold/tangram/task（相关查询）
-//       rank1 = 其他 mtop（只维护 Cookie，不作为回放模板）
-// 只升不降；同 rank 同 api 允许刷新（更新最新参数）。
+// 淘宝淘金币 —— Surge 抓包脚本 v3 (http-request, requires-body=true)
+// 核心：把淘金币页面所有 mtop 请求按「角色」分类存入模板池，供任务脚本按任务列表逐个回放。
+// 角色：sign  = 签到动作           (api 含 sign/checkin)
+//       award = 领取任务奖励       (api 含 award/reward/receive/claim/collect/prize)
+//       done  = 上报任务完成       (api 含 dotask/finish/complete/report/browse/visit/view/done)
+//       list  = 查询任务列表/中心   (api 含 task + list/query/center/page/info)
+//       other = 其他金币相关查询   (api 含 coin/jinbi/gold/tangram/welfare/benefit/task)
+// 每个角色保留最新模板（同角色不同 api 都存，回放时优先最新）；只维护 Cookie 的低价值请求不入池。
 
 const NAME = "淘金币抓包";
-const K_API = "tb_api";
+const K_POOL = "tb_tpl";          // 模板池 { api: rec }
+const K_API = "tb_api";           // v2 兼容（签到模板）
 const K_COOKIE = "tb_cookie";
 const K_TS = "tb_capture_time";
 const K_NOTIFY = "tb_last_notify";
+const MAX_POOL = 12;
 
 const HOP = { host: 1, connection: 1, "content-length": 1, "accept-encoding": 1, "content-encoding": 1, "transfer-encoding": 1, "proxy-connection": 1 };
 
@@ -50,29 +54,33 @@ function isMtopHost(host) {
 }
 
 function extractApi(url, bodyStr) {
-  let combined = url;
-  if (bodyStr && /api=|data=/.test(bodyStr)) {
-    combined = url.split("?")[0] + "?" + bodyStr;
-  }
-  const params = qparse(combined);
+  const uParams = qparse(url);
+  let bParams = {};
+  if (bodyStr && /(^|&)(api|data|t|sign)=/.test(bodyStr)) bParams = qparse("?" + bodyStr);
+  const params = Object.assign({}, uParams, bParams);
   let api = String(params.api || "");
   if (!api) {
     const m = String(url).match(/\/(mtop\.[a-zA-Z0-9._]+)\//);
     if (m) api = m[1];
   }
   const ver = String(params.v || "") || (String(url).match(/\/(\d+\.\d+)\//) || [])[1] || "1.0";
-  return { api, ver, params };
+  return { api, ver, params, bodyIsForm: Object.keys(bParams).length > 0 };
 }
 
-function rankOf(api, method) {
+function roleOf(api) {
   const a = String(api || "").toLowerCase();
-  if (!a) return 0;
-  if (method === "OPTIONS") return -1;
-  if (/gettimestamp|getcity|unit\.get|client\.log|behavior|config|abtest/i.test(a)) return 0;
-  if (/sign|checkin|signin|award|draw|receive|collect|claim|complete/i.test(a)) return 3;
-  if (/coin|jinbi|gold|tangram|task|welfare|benefit/i.test(a)) return 2;
-  return 1;
+  if (!a) return "";
+  if (/gettimestamp|getcity|unit\.get|client\.log|behavior|config|abtest|ums\.|monitor|log\.|detail\.|recommend|search\.|feed|banner|ad\./i.test(a)) return "";
+  if (/signin|checkin|dailysign|\.sign/i.test(a)) return "sign";
+  if (/award|reward|receive|claim|collect|prize|obtain/i.test(a)) return "award";
+  if (/dotask|finishtask|completetask|taskfinish|taskcomplete|report|browse|visit|view|done|finish|complete|trigger|execute/i.test(a)) return "done";
+  if (/task.*(list|query|center|page|info|get)|(query|get|list).*task|tasks|taskcenter|tasklist/i.test(a)) return "list";
+  if (/coin|jinbi|gold|tangram|welfare|benefit|task|macao|tjb/i.test(a)) return "other";
+  return "";
 }
+
+const ROLE_RANK = { sign: 3, award: 3, done: 3, list: 2, other: 1 };
+const ROLE_NAME = { sign: "签到", award: "领奖", done: "完成上报", list: "任务列表", other: "金币查询" };
 
 try {
   if (typeof $request === "undefined") {
@@ -91,68 +99,67 @@ try {
       } else {
         const ck = h["cookie"] || "";
         const bodyStr = String($request.body || "");
-        const { api, ver, params } = extractApi(url, bodyStr);
-        const rank = rankOf(api, method);
+        const { api, ver, params, bodyIsForm } = extractApi(url, bodyStr);
+        const role = roleOf(api);
 
         // 1. 维护 Cookie 池
         if (ck) {
           const oldCk = $persistentStore.read(K_COOKIE) || "";
           const merged = mergeCookie(oldCk, ck);
-          if (merged && merged !== oldCk) {
-            $persistentStore.write(merged, K_COOKIE);
-          }
+          if (merged && merged !== oldCk) $persistentStore.write(merged, K_COOKIE);
         }
 
-        const hasTk = /_m_h5_tk=/.test(ck);
-        console.log(`[${NAME}] ${method} api=${api || "(无)"} rank=${rank} cookie=${ck ? "有(tk=" + hasTk + ")" : "无"}`);
+        console.log(`[${NAME}] ${method} api=${api || "(无)"} role=${role || "-"} tk=${/_m_h5_tk=/.test(ck)}`);
 
-        if (rank < 2) {
+        if (!role) {
           $done({});
         } else {
-          let cur = {};
-          try { cur = JSON.parse($persistentStore.read(K_API) || "{}"); } catch (e) {}
-          const curRank = Number(cur && cur.rank) || 0;
-          const curInvalid = !cur.api || /gettimestamp|getcity|unit\.get/i.test(cur.api);
+          let pool = {};
+          try { pool = JSON.parse($persistentStore.read(K_POOL) || "{}"); } catch (e) {}
+          if (!pool || typeof pool !== "object") pool = {};
 
-          // 只升不降；同 rank 允许刷新（拿到最新参数）
-          if (!curInvalid && rank < curRank) {
-            console.log(`[${NAME}] rank=${rank} 低于已锁定 rank=${curRank}，跳过`);
-            $done({});
-          } else {
-            const clean = {};
-            Object.keys(h).forEach((k) => {
-              if (!HOP[k] && h[k] !== "") clean[k] = h[k];
-            });
+          const clean = {};
+          Object.keys(h).forEach((k) => { if (!HOP[k] && h[k] !== "") clean[k] = h[k]; });
 
-            const rec = {
-              url: url.split("?")[0],
-              fullUrl: url,
-              method: method,
-              params: params,
-              headers: clean,
-              body: bodyStr.slice(0, 8000),
-              api: api,
-              ver: ver,
-              rank: rank,
-              ts: Date.now()
-            };
+          const rec = {
+            url: url.split("?")[0],
+            method: method,
+            params: params,
+            headers: clean,
+            body: bodyStr.slice(0, 8000),
+            bodyIsForm: bodyIsForm,
+            api: api,
+            ver: ver,
+            role: role,
+            rank: ROLE_RANK[role] || 1,
+            ts: Date.now()
+          };
 
-            $persistentStore.write(JSON.stringify(rec), K_API);
-            $persistentStore.write(String(Date.now()), K_TS);
+          const isNew = !pool[api];
+          const hadRole = Object.keys(pool).some((k) => pool[k] && pool[k].role === role);
+          pool[api] = rec;
 
-            const lastNotify = Number($persistentStore.read(K_NOTIFY) || 0);
-            const isNewApi = String(cur.api || "") !== api;
-            if (isNewApi || rank > curRank || Date.now() - lastNotify > 8000) {
-              $persistentStore.write(String(Date.now()), K_NOTIFY);
-              console.log(`[${NAME}] 🎯 已锁定 rank=${rank} api=${api} v=${ver} data=${String(params.data || "").slice(0, 120)}`);
-              $notification.post(
-                NAME,
-                rank >= 3 ? "已锁定淘金币签到接口 🎯" : "已锁定淘金币任务接口",
-                `API: ${api}\n模板已保存，可去 Surge 执行手动签到`
-              );
-            }
-            $done({});
+          // 池子超限：淘汰最旧的 other 角色
+          const keys = Object.keys(pool);
+          if (keys.length > MAX_POOL) {
+            keys.filter((k) => pool[k].role === "other").sort((a, b) => pool[a].ts - pool[b].ts)
+              .slice(0, keys.length - MAX_POOL).forEach((k) => { delete pool[k]; });
           }
+          $persistentStore.write(JSON.stringify(pool), K_POOL);
+          $persistentStore.write(String(Date.now()), K_TS);
+          if (role === "sign") $persistentStore.write(JSON.stringify(rec), K_API); // v2 兼容
+
+          const lastNotify = Number($persistentStore.read(K_NOTIFY) || 0);
+          if (role !== "other" && (isNew || !hadRole || Date.now() - lastNotify > 8000)) {
+            $persistentStore.write(String(Date.now()), K_NOTIFY);
+            const locked = ["list", "sign", "done", "award"].map((r) => {
+              const ok = Object.keys(pool).some((k) => pool[k].role === r);
+              return `${ok ? "✅" : "⬜"}${ROLE_NAME[r]}`;
+            }).join(" ");
+            console.log(`[${NAME}] 🎯 锁定 ${role} api=${api} v=${ver} data=${String(params.data || "").slice(0, 120)}`);
+            $notification.post(NAME, `已锁定「${ROLE_NAME[role]}」接口 🎯`, `API: ${api}\n${locked}\n四项齐全后即可在 Surge 点「淘金币手动执行」`);
+          }
+          $done({});
         }
       }
     }
