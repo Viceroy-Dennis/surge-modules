@@ -10,6 +10,7 @@ const HDR_WX_KEY = "sgxh_headers_wx";
 const TOKEN_XH_KEY = "sgxh_token_xh";
 const HDR_XH_KEY = "sgxh_headers_xh";
 const COOKIE_KEY = "sgxh_cookie";
+const REWARD_URL_KEY = "sgxh_confirmed_reward_url";
 
 // 兼容旧键
 const TOKEN_KEY = "sgxh_token";
@@ -58,6 +59,23 @@ try {
     if (!HOST_RE.test(host)) {
       $done({});
     } else {
+      const method = String($request.method || "GET").toUpperCase();
+      const bodyStr = String($request.body || "");
+
+      // 核心侦听：如果在小程序内点了【领取】或其他 POST 领奖动作
+      if (method === "POST" && !url.includes("updateTaskProgress") && !url.includes("signIn") && !url.includes("openMiniApp") && !url.includes("likes")) {
+        console.log(`[${NAME}] 捕获 POST 请求: ${url} body=${bodyStr}`);
+        if (/task|reward|receive|claim|award|bonus|get|draw/i.test(url) || /taskId|task_id|bonus/i.test(bodyStr)) {
+          $persistentStore.write(url, REWARD_URL_KEY);
+          console.log(`[${NAME}] 🎯 成功捕获真实领奖接口: ${url}`);
+          $notification.post(
+            NAME,
+            "🎯 真实领奖接口已锁定！",
+            `接口: ${url.replace(/^https?:\/\/[^/]+/i, "")}\n参数: ${bodyStr.slice(0, 100)}\n后续自动调用此接口领奖！`
+          );
+        }
+      }
+
       const h = lowerHeaders($request.headers || {});
       const tok = pickToken(h);
 
