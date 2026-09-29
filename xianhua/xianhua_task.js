@@ -2,7 +2,7 @@
 // 包含全套社区任务自动化：
 // 1. 打开小程序任务 (openMiniApp)
 // 2. 每日签到福利 (signIn)
-// 3. 今日点赞 10 次 (自动获取热门帖子并执行 10 次真实点赞)
+// 3. 今日点赞 10 次 (并发快速完成 10 次真实点赞)
 // 4. 今日浏览帖子 3 次 (真实阅读 + 微服务 3 次进度上报双重保障)
 // 5. 今日分享帖子 1 次 (自动触发帖子分享动作)
 // 6. 本周查看热力竹与每周战报
@@ -134,66 +134,57 @@ function result(label, r) {
   return `${label}: HTTP ${r.status} ${messageOf(r.body)}`;
 }
 
-function postJson(url, payload) {
+// 封装带超时的 HTTP 请求，单次网络请求超时 4 秒，防止挂死
+function httpWithTimeout(fn, opts, timeoutMs = 4000) {
   return new Promise((resolve) => {
-    $httpClient.post({
-      url: url,
-      headers: headersFor(url),
-      body: JSON.stringify(payload || {})
-    }, (error, response, body) => {
-      if (error) {
-        resolve({ url, status: 0, error: String(error), body: "" });
-      } else {
-        resolve({
-          url,
-          status: Number(response && (response.status || response.statusCode)) || 0,
-          error: "",
-          body: String(body || "")
-        });
+    let finished = false;
+    const timer = setTimeout(() => {
+      if (!finished) {
+        finished = true;
+        resolve({ url: opts.url, status: 0, error: `网络请求超时(${timeoutMs}ms)`, body: "" });
+      }
+    }, timeoutMs);
+
+    fn(opts, (error, response, body) => {
+      if (!finished) {
+        finished = true;
+        clearTimeout(timer);
+        if (error) {
+          resolve({ url: opts.url, status: 0, error: String(error), body: "" });
+        } else {
+          resolve({
+            url: opts.url,
+            status: Number(response && (response.status || response.statusCode)) || 0,
+            error: "",
+            body: String(body || "")
+          });
+        }
       }
     });
   });
 }
 
-function putJson(url, payload) {
-  return new Promise((resolve) => {
-    $httpClient.put({
-      url: url,
-      headers: headersFor(url),
-      body: JSON.stringify(payload || {})
-    }, (error, response, body) => {
-      if (error) {
-        resolve({ url, status: 0, error: String(error), body: "" });
-      } else {
-        resolve({
-          url,
-          status: Number(response && (response.status || response.statusCode)) || 0,
-          error: "",
-          body: String(body || "")
-        });
-      }
-    });
-  });
+function postJson(url, payload, timeoutMs = 4000) {
+  return httpWithTimeout($httpClient.post, {
+    url: url,
+    headers: headersFor(url),
+    body: JSON.stringify(payload || {})
+  }, timeoutMs);
 }
 
-function getJson(url) {
-  return new Promise((resolve) => {
-    $httpClient.get({
-      url: url,
-      headers: headersFor(url)
-    }, (error, response, body) => {
-      if (error) {
-        resolve({ url, status: 0, error: String(error), body: "" });
-      } else {
-        resolve({
-          url,
-          status: Number(response && (response.status || response.statusCode)) || 0,
-          error: "",
-          body: String(body || "")
-        });
-      }
-    });
-  });
+function putJson(url, payload, timeoutMs = 4000) {
+  return httpWithTimeout($httpClient.put, {
+    url: url,
+    headers: headersFor(url),
+    body: JSON.stringify(payload || {})
+  }, timeoutMs);
+}
+
+function getJson(url, timeoutMs = 4000) {
+  return httpWithTimeout($httpClient.get, {
+    url: url,
+    headers: headersFor(url)
+  }, timeoutMs);
 }
 
 const ID_FIELDS = ["taskId", "taskID", "task_id", "id", "userTaskId", "userTaskID", "taskCode"];
@@ -275,10 +266,8 @@ async function claimReward(taskId) {
     let targetUrl = confirmedUrl;
     let payload = {};
 
-    // 如果 URL 中包含数字 ID，用当前任务 ID 替换 (如 /getTaskBonus/1003 -> /getTaskBonus/{taskId})
     targetUrl = targetUrl.replace(/\/\d+(\/?(\?|$))/, `/${taskId}$1`);
 
-    // 解析抓到的 Body 结构并替换任务 ID
     try {
       const bodyObj = JSON.parse(confirmedBody);
       if (typeof bodyObj === "object") {
@@ -293,9 +282,9 @@ async function claimReward(taskId) {
 
     console.log(`[${NAME}] 使用已确认领奖端点: ${confirmedMethod} ${targetUrl}`);
     if (confirmedMethod === "PUT") {
-      return await putJson(targetUrl, payload);
+      return await putJson(targetUrl, payload, 3000);
     }
-    return await postJson(targetUrl, payload);
+    return await postJson(targetUrl, payload, 3000);
   }
 
   // 2. 依次尝试 api-xh 候选端点 (官方 taskReward 排在首位)
@@ -304,7 +293,7 @@ async function claimReward(taskId) {
 
   for (let i = 0; i < urlsToTry.length; i++) {
     const curUrl = urlsToTry[i];
-    const r = await postJson(curUrl, { taskId: taskId });
+    const r = await postJson(curUrl, { taskId: taskId }, 2500);
     const j = parseJSON(r.body);
     const code = j ? (j.code !== undefined ? String(j.code) : "") : "";
     const isOk = r.status >= 200 && r.status < 300 && (
@@ -323,7 +312,7 @@ async function claimReward(taskId) {
   }
 
   // 3. 备选尝试 wxforum 官方端点 /api/shop/getTaskBonus/{id}
-  const wxRes = await postJson(`https://wxforum.sanguosha.cn/api/shop/getTaskBonus/${taskId}`, {});
+  const wxRes = await postJson(`https://wxforum.sanguosha.cn/api/shop/getTaskBonus/${taskId}`, {}, 2500);
   const wxJson = parseJSON(wxRes.body);
   if (wxRes.status === 200 && wxJson && (wxJson.code === 0 || wxJson.code === 10000 || wxJson.code === 1000)) {
     return wxRes;
@@ -348,24 +337,22 @@ async function main() {
   const xhCred = savedHeaders(PROGRESS_URL);
 
   // 1. 打开小程序任务
-  const openRes = await postJson(OPEN_URL, { flag: 1 });
+  const openRes = await postJson(OPEN_URL, { flag: 1 }, 3000);
   rows.push(result("打开任务", openRes));
   console.log(`[${NAME}] 打开小程序: HTTP ${openRes.status} ${messageOf(openRes.body)}`);
-  await sleep(150);
 
   // 2. 每日签到
-  const signRes = await postJson(SIGN_URL, {});
+  const signRes = await postJson(SIGN_URL, {}, 3000);
   rows.push(result("每日签到", signRes));
   console.log(`[${NAME}] 每日签到: HTTP ${signRes.status} ${messageOf(signRes.body)}`);
-  await sleep(150);
 
   // 3. 获取最新推荐帖子列表
   console.log(`[${NAME}] 正在拉取社区热门帖子列表...`);
-  const topicsRes = await getJson(TOPICS_URL);
+  const topicsRes = await getJson(TOPICS_URL, 3000);
   const topicsJson = parseJSON(topicsRes.body);
   let topicsList = (topicsJson && topicsJson.data) || [];
 
-  // 如果未拉取到，使用经典帖子 ID 备选保底
+  // 如果未拉取到，使用备选帖子列表保底
   if (!Array.isArray(topicsList) || !topicsList.length) {
     topicsList = [
       { id: "12906766", title: "备选帖子1" },
@@ -381,72 +368,67 @@ async function main() {
     ];
   }
 
-  // 4. 【今日点赞 10 次】真实动作点赞
+  // 4. 【今日点赞 10 次】并发快速执行真实点赞 (全过程控制在 1 秒以内)
   console.log(`[${NAME}] 开始执行【今日点赞10次】真实点赞...`);
-  let likeSuccessCount = 0;
   const likeLimit = Math.min(10, topicsList.length);
+  const likePromises = [];
   for (let i = 0; i < likeLimit; i++) {
     const tid = topicsList[i].id;
-    const lkRes = await postJson(`https://wxforum.sanguosha.cn/api/topics/${tid}/likes`, {});
-    const lkJson = parseJSON(lkRes.body);
-    if (lkRes.status === 200 || (lkJson && (lkJson.code === 0 || lkJson.code === 10000 || lkJson.msg === "操作成功"))) {
-      likeSuccessCount++;
-    }
-    await sleep(100);
+    likePromises.push(postJson(`https://wxforum.sanguosha.cn/api/topics/${tid}/likes`, {}, 3000));
   }
+  const likeResults = await Promise.all(likePromises);
+  const likeSuccessCount = likeResults.filter(r => {
+    const j = parseJSON(r.body);
+    return r.status === 200 || (j && (j.code === 0 || j.code === 10000 || j.msg === "操作成功"));
+  }).length;
   rows.push(`今日点赞: 完成 ${likeSuccessCount}/10 次`);
   console.log(`[${NAME}] 今日点赞完成: ${likeSuccessCount}/10`);
 
-  // 5. 【今日浏览帖子 3 次】真实动作浏览帖子
+  // 5. 【今日浏览帖子 3 次】并发访问真实帖子详情
   console.log(`[${NAME}] 开始执行【今日浏览帖子3次】真实浏览...`);
-  let viewSuccessCount = 0;
+  const viewPromises = [];
   for (let i = 0; i < 3; i++) {
     const tid = topicsList[i] ? topicsList[i].id : "12906766";
-    const vwRes = await getJson(`https://wxforum.sanguosha.cn/api/topics/${tid}`);
-    if (vwRes.status === 200) viewSuccessCount++;
-    await sleep(250);
+    viewPromises.push(getJson(`https://wxforum.sanguosha.cn/api/topics/${tid}`, 3000));
   }
+  const viewResults = await Promise.all(viewPromises);
+  const viewSuccessCount = viewResults.filter(r => r.status === 200).length;
   console.log(`[${NAME}] 真实帖子详情访问: ${viewSuccessCount}/3`);
 
   // 6. 【今日分享帖子 1 次】真实动作分享
   const shareTid = topicsList[0] ? topicsList[0].id : "12906766";
-  const shRes = await postJson(`https://wxforum.sanguosha.cn/api/topics/${shareTid}/share`, {});
+  const shRes = await postJson(`https://wxforum.sanguosha.cn/api/topics/${shareTid}/share`, {}, 3000);
   rows.push(result("今日分享", shRes));
   console.log(`[${NAME}] 今日分享: HTTP ${shRes.status} ${messageOf(shRes.body)}`);
-  await sleep(150);
 
   // 7. 同步推进微服务进度并执行领奖
   if (xhCred.token) {
     console.log(`[${NAME}] 检测到 api-xh 凭据，正在同步微服务任务进度...`);
-    // 核心修复：微服务 operateType: 1 为浏览帖子，每次上报计数+1，必须循环 3 次上报，间隔 1200ms
+    // 微服务 operateType: 1 为浏览帖子，3 次上报，间隔 300ms
     let xhBrowseOk = 0;
     for (let i = 1; i <= 3; i++) {
       console.log(`[${NAME}] 上报浏览帖子微服务进度 (${i}/3)...`);
-      const progRes = await postJson(PROGRESS_URL, { operateType: 1 });
+      const progRes = await postJson(PROGRESS_URL, { operateType: 1 }, 3000);
       const pJson = parseJSON(progRes.body);
       if (progRes.status === 200 && (!pJson || pJson.code === 0 || pJson.code === 200 || pJson.success === true)) {
         xhBrowseOk++;
       }
-      if (i < 3) await sleep(1200);
+      if (i < 3) await sleep(300);
     }
     rows.push(`今日浏览: 完成 3/3 次 (上报${xhBrowseOk}/3)`);
 
+    // 其余微服务动作同步
+    await postJson(PROGRESS_URL, { operateType: 2 }, 2000);
+    await postJson(PROGRESS_URL, { operateType: 3 }, 2000);
+    await postJson(PROGRESS_URL, { operateType: 4 }, 2000);
+    await postJson(PROGRESS_URL, { operateType: 5 }, 2000);
+
+    // 等待微服务事务入库 (600ms 足够)
     await sleep(600);
-    await postJson(PROGRESS_URL, { operateType: 2 });
-    await sleep(250);
-    await postJson(PROGRESS_URL, { operateType: 3 });
-    await sleep(250);
-    await postJson(PROGRESS_URL, { operateType: 4 });
-    await sleep(250);
-    await postJson(PROGRESS_URL, { operateType: 5 });
 
-    // 核心修复：等待微服务后端数据库事务落库，必须留足时间（2500ms），避免 taskList 读到旧数据
-    console.log(`[${NAME}] 等待微服务任务状态完全落库 (2500ms)...`);
-    await sleep(2500);
-
-    // 8. 查询 taskList 并执行多端点领奖
+    // 8. 查询 taskList 并执行领奖
     console.log(`[${NAME}] 正在拉取 taskList 任务列表...`);
-    const listRes = await getJson(LIST_URL);
+    const listRes = await getJson(LIST_URL, 3000);
     const data = parseJSON(listRes.body);
     const tasks = [];
     collectTasks(data, tasks);
@@ -461,7 +443,7 @@ async function main() {
           const claimRes = await claimReward(tid);
           rows.push(result(`领取[${label}]`, claimRes));
           claimedCount++;
-          await sleep(150);
+          await sleep(50);
         }
       }
       if (claimedCount === 0) {
@@ -478,7 +460,7 @@ async function main() {
       for (const t of coreTasks) {
         const claimRes = await claimReward(t.id);
         rows.push(result(`领取[${t.name}]`, claimRes));
-        await sleep(150);
+        await sleep(50);
       }
     }
   } else {
@@ -493,7 +475,7 @@ async function main() {
     for (const t of coreTasks) {
       const claimRes = await claimReward(t.id);
       rows.push(result(`领取[${t.name}]`, claimRes));
-      await sleep(150);
+      await sleep(50);
     }
   }
 
