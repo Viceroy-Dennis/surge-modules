@@ -38,21 +38,33 @@ function savedHeaders(isXh) {
   return h;
 }
 
-function getJson(url, isXh) {
+function getJson(url, isXh, timeoutMs = 4000) {
   return new Promise((resolve) => {
+    let finished = false;
+    const timer = setTimeout(() => {
+      if (!finished) {
+        finished = true;
+        resolve({ url, status: 0, error: `网络请求超时(${timeoutMs}ms)`, body: "" });
+      }
+    }, timeoutMs);
+
     $httpClient.get({
       url: url,
       headers: savedHeaders(isXh)
     }, (error, response, body) => {
-      if (error) {
-        resolve({ url, status: 0, error: String(error), body: "" });
-      } else {
-        resolve({
-          url,
-          status: Number(response && (response.status || response.statusCode)) || 0,
-          error: "",
-          body: String(body || "")
-        });
+      if (!finished) {
+        finished = true;
+        clearTimeout(timer);
+        if (error) {
+          resolve({ url, status: 0, error: String(error), body: "" });
+        } else {
+          resolve({
+            url,
+            status: Number(response && (response.status || response.statusCode)) || 0,
+            error: "",
+            body: String(body || "")
+          });
+        }
       }
     });
   });
@@ -86,7 +98,7 @@ async function main() {
 
   // 测试任务列表
   console.log(`[${NAME}] 正在测试 api-xh 任务列表...`);
-  const res = await getJson(LIST_URL, true);
+  const res = await getJson(LIST_URL, true, 4000);
 
   rows.push("\n📡 api-xh 任务网关实测:");
   if (res.status === 200) {
