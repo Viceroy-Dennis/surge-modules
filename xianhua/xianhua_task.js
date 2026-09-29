@@ -8,7 +8,7 @@
 // 6. 本周查看热力竹与每周战报
 // 7. 智能多端点自动领奖 (支持官方 taskReward、getTaskBonus 及备选微服务端点)
 
-const NAME = "三国咸话";
+const NAME = "三国咸话(极速并发版)";
 const TOKEN_WX_KEY = "sgxh_token_wx";
 const HDR_WX_KEY = "sgxh_headers_wx";
 const TOKEN_XH_KEY = "sgxh_token_xh";
