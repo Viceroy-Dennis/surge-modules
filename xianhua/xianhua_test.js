@@ -1,13 +1,9 @@
 // 三国咸话 —— 综合体检与状态诊断脚本 (Surge Generic 专用)
-// 用途: 一键诊断 wxforum (签到通道) 与 api-xh (任务/浏览通道) 的独立凭据健康状态
+// 用途: 一键诊断 wxforum (签到通道) 与 api-xh (任务/浏览通道) 的独立凭据健康状态及任务列表进度
 
 const NAME = "三国咸话测试";
 const HEADER_KEY = "sgxh_headers";
 const TOKEN_KEY = "sgxh_token";
-const XH_HDR_KEY = "sgxh_xh_headers";
-const XH_TOK_KEY = "sgxh_xh_token";
-const WX_HDR_KEY = "sgxh_wx_headers";
-const WX_TOK_KEY = "sgxh_wx_token";
 const TIME_KEY = "sgxh_capture_time";
 
 const LIST_URL = "https://api-xh.sanguosha.cn/task/sgxh-task/taskList";
@@ -15,8 +11,16 @@ const LIST_URL = "https://api-xh.sanguosha.cn/task/sgxh-task/taskList";
 const DROP = { host: 1, connection: 1, "keep-alive": 1, "proxy-connection": 1, "transfer-encoding": 1, "content-length": 1, "content-encoding": 1, "accept-encoding": 1 };
 
 function savedHeaders(isXh) {
-  const hdrRaw = (isXh ? ($persistentStore.read(XH_HDR_KEY) || $persistentStore.read(HEADER_KEY)) : ($persistentStore.read(WX_HDR_KEY) || $persistentStore.read(HEADER_KEY))) || "{}";
-  const tokRaw = (isXh ? ($persistentStore.read(XH_TOK_KEY) || $persistentStore.read(TOKEN_KEY)) : ($persistentStore.read(WX_TOK_KEY) || $persistentStore.read(TOKEN_KEY))) || "";
+  let hdrRaw = "";
+  let tokRaw = "";
+
+  if (isXh) {
+    hdrRaw = $persistentStore.read("sgxh_headers_xh") || $persistentStore.read("sgxh_xh_headers") || $persistentStore.read(HEADER_KEY) || "{}";
+    tokRaw = $persistentStore.read("sgxh_token_xh") || $persistentStore.read("sgxh_xh_token") || $persistentStore.read(TOKEN_KEY) || "";
+  } else {
+    hdrRaw = $persistentStore.read("sgxh_headers_wx") || $persistentStore.read("sgxh_wx_headers") || $persistentStore.read(HEADER_KEY) || "{}";
+    tokRaw = $persistentStore.read("sgxh_token_wx") || $persistentStore.read("sgxh_wx_token") || $persistentStore.read(TOKEN_KEY) || "";
+  }
 
   let saved = {};
   try { saved = JSON.parse(hdrRaw); } catch (e) {}
@@ -63,13 +67,17 @@ async function main() {
   const rows = [];
 
   const genTok = $persistentStore.read(TOKEN_KEY) || "";
-  const wxTok = $persistentStore.read(WX_TOK_KEY) || genTok;
-  const xhTok = $persistentStore.read(XH_TOK_KEY) || "";
+  const wxTok = $persistentStore.read("sgxh_token_wx") || $persistentStore.read("sgxh_wx_token") || genTok;
+  const xhTok = $persistentStore.read("sgxh_token_xh") || $persistentStore.read("sgxh_xh_token") || "";
   const capTime = $persistentStore.read(TIME_KEY);
+  const rewardUrl = $persistentStore.read("sgxh_confirmed_reward_url") || "";
 
   rows.push("🔑 双通道凭据捕获状态:");
   rows.push(`  • 签到通道 (wxforum): ${wxTok ? `✅ 已具备 (长 ${wxTok.length} 位)` : "❌ 缺失"}`);
   rows.push(`  • 社区/任务通道 (api-xh): ${xhTok ? `✅ 已具备 (长 ${xhTok.length} 位)` : "⚠️ 尚未捕获"}`);
+  if (rewardUrl) {
+    rows.push(`  • 🎯 领奖端点: 已锁定 ${rewardUrl.replace(/^https?:\/\/[^/]+/i, "")}`);
+  }
 
   if (capTime) {
     const d = new Date(Number(capTime));
@@ -86,10 +94,19 @@ async function main() {
     const j = parseJSON(res.body);
     const tasks = (j && j.data) || [];
     rows.push(`  • 识别任务数: ${tasks.length} 项`);
-    const browseTask = tasks.find(t => String(t.taskDesc || t.taskName || "").includes("浏览") && String(t.taskDesc || t.taskName || "").includes("3")) || tasks[0];
-    if (browseTask) {
-      console.log(`[${NAME}] 浏览任务详情: ${JSON.stringify(browseTask)}`);
-      rows.push(`  • 浏览任务原始结构: ${JSON.stringify(browseTask).slice(0, 300)}`);
+
+    // 格式化输出目标核心任务
+    const targets = tasks.filter(t => /浏览|点赞|分享|签到/i.test(String(t.taskName || t.taskDesc || "")));
+    if (targets.length) {
+      rows.push("📋 今日核心任务状态:");
+      targets.forEach(t => {
+        const name = t.taskName || t.taskDesc || t.taskId;
+        const cur = t.progress !== undefined ? t.progress : (t.current !== undefined ? t.current : "-");
+        const total = t.total !== undefined ? t.total : (t.target !== undefined ? t.target : "-");
+        const isRec = t.isReceive === 1 || t.isReceived === 1 || t.receiveStatus === 2 || t.status === 2;
+        const statusTxt = isRec ? "✅ 已领取" : "⏳ 待领取/进行中";
+        rows.push(`  • ${name}: 进度 ${cur}/${total} [${statusTxt}]`);
+      });
     }
   } else if (res.status === 401 || (res.body && res.body.includes("token已经过期"))) {
     rows.push(`  • 接口状态: 🔴 401 凭据缺失或已过期`);
@@ -100,7 +117,7 @@ async function main() {
 
   const text = rows.join("\n");
   console.log(`[${NAME}]\n${text}`);
-  $notification.post(NAME, xhTok ? "咸话凭据完备" : "咸话体检诊断", text);
+  $notification.post(NAME, xhTok ? "咸话体检正常 🟢" : "咸话凭据体检", text);
   $done({ summary: text });
 }
 
