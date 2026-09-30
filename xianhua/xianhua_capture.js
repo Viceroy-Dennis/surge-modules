@@ -69,8 +69,10 @@ try {
 
       if (isAction && !isKnownAction) {
         console.log(`[${NAME}] 捕获动作请求: ${method} ${url} body=${bodyStr.slice(0, 100)}`);
-        // 匹配领奖特征：URL 或 Body 中包含 task、reward、receive、bonus 等关键字
-        if (/task|reward|receive|claim|award|bonus|draw|get/i.test(url) || /taskId|task_id|bonus|award/i.test(bodyStr)) {
+        // 匹配领奖特征：URL 或 Body 中包含任何动作/奖励/商城相关词
+        const isRewardLike = /task|reward|receive|claim|award|bonus|draw|get|finish|exchange|shop/i.test(url) || 
+                             /taskId|task_id|bonus|award|id|type/i.test(bodyStr);
+        if (isRewardLike) {
           $persistentStore.write(url, REWARD_URL_KEY);
           $persistentStore.write(method, REWARD_METHOD_KEY);
           $persistentStore.write(bodyStr, REWARD_BODY_KEY);
