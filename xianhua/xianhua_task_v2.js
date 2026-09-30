@@ -223,12 +223,6 @@ function taskLabel(t) {
 function alreadyClaimed(t) {
   const r = pick(t, RECEIVED_FIELDS);
   if (r && truthy(r.value)) return true;
-
-  const s = pick(t, ["userTaskStatus", "taskStatus", "status", "state"]);
-  if (s && (s.value === 2 || s.value === "2" || s.value === 3 || s.value === "3")) return true;
-
-  if (t.receiveStatus === 2 || t.receiveStatus === "2") return true;
-
   return false;
 }
 
@@ -243,24 +237,30 @@ function claimable(t) {
   return isDailyTargetTask(t);
 }
 
-async function claimReward(taskId) {
+async function claimReward(t) {
   const confirmedUrl = $persistentStore.read(REWARD_URL_KEY) || "";
   const confirmedMethod = $persistentStore.read("sgxh_confirmed_reward_method") || "POST";
   const confirmedBody = $persistentStore.read("sgxh_confirmed_reward_body") || "";
 
+  const tid = typeof t === "object" ? taskIdOf(t) : t;
+  const uid = typeof t === "object" ? (t.userTaskId || t.userTaskID || t.id || tid) : tid;
+
   if (confirmedUrl) {
-    let targetUrl = confirmedUrl.replace(/\/\d+(\/?(\?|$))/, `/${taskId}$1`);
+    let targetUrl = confirmedUrl.replace(/\/\d+(\/?(\?|$))/, `/${tid}$1`);
     let payload = {};
     try {
       const bodyObj = JSON.parse(confirmedBody);
       if (typeof bodyObj === "object") {
         payload = bodyObj;
         ["taskId", "task_id", "id", "taskCode"].forEach((k) => {
-          if (payload[k] !== undefined) payload[k] = taskId;
+          if (payload[k] !== undefined) payload[k] = tid;
+        });
+        ["userTaskId", "userTaskID"].forEach((k) => {
+          if (payload[k] !== undefined) payload[k] = uid;
         });
       }
     } catch (e) {
-      payload = { taskId: taskId };
+      payload = { taskId: tid };
     }
 
     if (confirmedMethod === "PUT") {
@@ -269,26 +269,43 @@ async function claimReward(taskId) {
     return await postJson(targetUrl, payload, 2000);
   }
 
-  // 依次尝试候选端点 (首选官方 taskReward)
+  // 依次尝试候选端点与参数组合 (首选官方 taskReward)
+  const attemptPayloads = [
+    { taskId: tid },
+    { taskId: Number(tid) },
+    { userTaskId: uid },
+    { id: tid }
+  ];
+
+  let firstRes = null;
   for (let i = 0; i < CANDIDATE_REWARD_URLS.length; i++) {
     const curUrl = CANDIDATE_REWARD_URLS[i];
-    const r = await postJson(curUrl, { taskId: taskId }, 2000);
-    const j = parseJSON(r.body);
-    const code = j ? (j.code !== undefined ? String(j.code) : "") : "";
-    const isOk = r.status >= 200 && r.status < 300 && (
-      (j && (j.success === true || code === "0" || code === "200" || code === "1000")) ||
-      /成功|已领取|获得/.test(r.body)
-    );
+    for (const payload of attemptPayloads) {
+      const r = await postJson(curUrl, payload, 2000);
+      const j = parseJSON(r.body);
+      const code = j ? (j.code !== undefined ? String(j.code) : "") : "";
+      const isOk = r.status >= 200 && r.status < 300 && (
+        (j && (j.success === true || code === "0" || code === "200" || code === "1000")) ||
+        /成功|已领取|获得/.test(r.body)
+      );
 
-    if (isOk) {
-      $persistentStore.write(curUrl, REWARD_URL_KEY);
-      return r;
+      console.log(`[${NAME}] 领奖试探 ${curUrl.replace(/^https?:\/\/[^/]+/i, "")} ${JSON.stringify(payload)} -> HTTP ${r.status} ${messageOf(r.body)}`);
+
+      if (isOk) {
+        $persistentStore.write(curUrl, REWARD_URL_KEY);
+        console.log(`[${NAME}] 🎯 成功锁定领奖接口: ${curUrl}`);
+        return r;
+      }
+      if (!firstRes) firstRes = r;
+      if (isAuthError(r)) break;
     }
-    if (isAuthError(r)) break;
   }
 
   // 备选尝试 wxforum 官方端点
-  return await postJson(`https://wxforum.sanguosha.cn/api/shop/getTaskBonus/${taskId}`, {}, 2000);
+  const wxRes = await postJson(`https://wxforum.sanguosha.cn/api/shop/getTaskBonus/${tid}`, {}, 2000);
+  if (wxRes.status === 200) return wxRes;
+
+  return firstRes || wxRes;
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -387,11 +404,10 @@ async function main() {
     console.log(`[${NAME}] 识别到 ${tasks.length} 项任务`);
     const claimPromises = [];
     for (const t of tasks) {
-      const tid = taskIdOf(t);
       const label = taskLabel(t);
       if (claimable(t)) {
         claimPromises.push((async () => {
-          const claimRes = await claimReward(tid);
+          const claimRes = await claimReward(t);
           return result(`领取[${label}]`, claimRes);
         })());
       }
@@ -405,12 +421,12 @@ async function main() {
   } else {
     // 容灾保底：直接尝试领奖核心任务
     const coreTasks = [
-      { id: "1001", name: "今日点赞10次" },
-      { id: "1003", name: "今日浏览帖子3次" },
-      { id: "1004", name: "今日分享帖子1次" }
+      { id: "1001", taskId: "1001", name: "今日点赞10次" },
+      { id: "1003", taskId: "1003", name: "今日浏览帖子3次" },
+      { id: "1004", taskId: "1004", name: "今日分享帖子1次" }
     ];
     const corePromises = coreTasks.map(async t => {
-      const claimRes = await claimReward(t.id);
+      const claimRes = await claimReward(t);
       return result(`领取[${t.name}]`, claimRes);
     });
     const coreOutputs = await Promise.all(corePromises);
