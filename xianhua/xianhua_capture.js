@@ -1,6 +1,6 @@
 // 三国咸话 —— Surge 登录凭据抓包脚本 (http-request)
 // 1. 双通道隔离：wxforum (HS256) 与 api-xh (RS256) 完全独立存储，绝不互相覆盖
-// 2. 智能领奖嗅探：捕获用户在小程序内点击【领取】时的真实接口 URL、Method、Body
+// 2. 智能领奖嗅探 + [object Null] 脏头过滤（2026-10-11 与 QX 版同步）
 // 3. 全流程可视化：只要是 POST 或 PUT 动作全部打印到日志，方便精准排查
 
 const NAME = "三国咸话";
@@ -100,7 +100,11 @@ try {
       } else {
         const saved = {};
         Object.keys(h).forEach((k) => {
-          if (!DROP[k] && h[k] !== "") saved[k] = h[k];
+          if (DROP[k] || h[k] === "") return;
+          const v = String(h[k]).trim();
+          // 过滤 JS 序列化 bug 产物（如 "[object Null]"）——已实测：该脏值传给 api-xh 直接 401
+          if (/^\[object .*\]$/i.test(v) || v === "undefined" || v === "null") return;
+          saved[k] = v;
         });
 
         const isXh = /api-xh|xh\.sanguosha|api-forum-act/i.test(host);
