@@ -105,3 +105,25 @@ https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/tuhu.sgmodul
   1. 安装模块开启后，打开「途虎养车」App 或微信小程序。
   2. Surge 弹出通知：`[途虎抓包] Token 获取成功 🎉`。
   3. 每天 07:17 自动完成双签并汇报可抵扣现金，捕获成功后可将模块参数 `capture` 改为 `#` 关闭抓包。
+
+---
+
+## 7. 蜗牛 I 4K 每日签到 (wn4k.com)
+
+**模块安装 URL**（Surge → 模块 → 安装 → 粘贴）：
+```text
+https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/wn4k.sgmodule
+```
+
+| 文件路径 | 说明 |
+|---|---|
+| `wn4k.sgmodule` | 模块本体：Cookie 抓包 + 每天 09:14 自动签到 + 手动入口 |
+| `wn4k/wn4k_task.js` | 主脚本（抓包 / 签到双模式，MacCMS 登录 + 签到接口） |
+| `tests/wn4k.surge.mock.test.js` | 本地 mock 回归测试（14 条断言） |
+
+- **站点**：MacCMS V10 + 盘链模板。登录 `POST /user/login.html`、签到 `POST /user/checkin.html`，无验证码。
+- **使用方法**：
+  1. 安装模块（会往 MITM 追加 `wn4k.com, www.wn4k.com`）。
+  2. 浏览器登录 wn4k.com，打开一次「会员中心」任意页面 → 通知「凭据已更新」。
+  3. 之后每天 **09:14** 自动签到；签到成功当天不再重复请求。
+- **想用账号密码**（Cookie 过期时脚本能自己重登）：模块 → 蜗牛4K → 参数 `account` 填 `账号,密码`，多账号用 `&&` 分隔；留 `none` 只用抓包 Cookie。
