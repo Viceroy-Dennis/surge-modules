@@ -127,3 +127,26 @@ https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/wn4k.sgmodul
   2. 浏览器登录 wn4k.com，打开一次「会员中心」任意页面 → 通知「凭据已更新」。
   3. 之后每天 **09:14** 自动签到；签到成功当天不再重复请求。
 - **想用账号密码**（Cookie 过期时脚本能自己重登）：模块 → 蜗牛4K → 参数 `account` 填 `账号,密码`，多账号用 `&&` 分隔；留 `none` 只用抓包 Cookie。
+
+---
+
+## 8. NodeSeek 每日签到（页面注入版 v5）
+
+**模块安装 URL**（Surge → 模块 → 安装 → 粘贴）：
+```text
+https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/nodeseek.sgmodule
+```
+
+| 文件路径 | 说明 |
+|---|---|
+| `nodeseek.sgmodule` | 模块本体：首页响应注入签到脚本 + MITM |
+| `nodeseek/nodeseek_inject.js` | 注入脚本（`http-response`，幂等 + 当天去重 + 页面 toast） |
+
+**为什么不用 `$httpClient` 直接签**：NodeSeek 的 Cloudflare 是全程 managed challenge。实测同一 IP、同一批 cookie：
+
+- 浏览器页面内 `POST /api/attendance` → `500 {"message":"USER NOT FOUND"}`（已穿过 CF）
+- 代理栈 `$httpClient` 打同一个接口 → `403 <title>Just a moment...</title>`
+
+死的是 TLS/HTTP2 指纹 + JS 挑战，**不是登录态**，所以账号密码也救不了（`/signIn.html` 一样 `403 cf-mitigated: challenge`）。
+
+**用法**：装模块（会自动往 MITM 追加 `www.nodeseek.com`）→ 打开一次 NodeSeek 首页 → 右下角弹「签到成功」。当天重复打开不会重复打接口。

@@ -1,0 +1,10 @@
+#!name=NodeSeek 每日签到
+#!desc=打开 NodeSeek 首页时自动签到。不走代理栈发请求，而是往页面里注入一小段 JS，让 Safari 自己发——绕开 Cloudflare 的 TLS 指纹限制（QX / 代理栈直连签到接口必 403 Just a moment）。
+#!category=自动任务
+
+[Script]
+# 只匹配首页，避免每个页面都注入
+NodeSeek签到注入 = type=http-response,pattern=^https?:\/\/www\.nodeseek\.com\/$,requires-body=true,max-size=1048576,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/nodeseek/nodeseek_inject.js,script-update-interval=0
+
+[MITM]
+hostname = %APPEND% www.nodeseek.com
