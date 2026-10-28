@@ -1,15 +1,14 @@
 /*
- * NodeSeek 每日签到 · 浏览器内注入版 v5 · Surge
+ * NodeSeek 每日签到 · 浏览器内注入版 v5.1 · Surge
  * 作者：Linda for Dennis
  *
- * 原理：CF 对 www.nodeseek.com 全程 managed challenge（cf-mitigated: challenge）。
- * 实测同一 IP、同一批 cookie：
- *   浏览器页面内 POST /api/attendance → 500 {"message":"USER NOT FOUND"}  ← 过了 CF
- *   $httpClient        POST /api/attendance → 403 <title>Just a moment...</title>  ← 死在 CF
- * 死的是 TLS/HTTP2 指纹 + JS 挑战，换账号密码也没用（登录页同样 403）。
+ * 原理：CF 对 www.nodeseek.com 的 /api/* 路径是 managed challenge（cf-mitigated: challenge），
+ * 代理栈（$httpClient / $task.fetch）打过去一律 403 Just a moment；
+ * 而同一个 IP、同一批 cookie，浏览器页面内 fetch 过去是 500 USER NOT FOUND（业务层拒的，已过 CF）。
+ * 差别只在 TLS/HTTP2 指纹和 JS 能力 —— 换账号密码也没用，/signIn.html 一样 403。
  *
- * 所以这个脚本自己不签，只往首页 HTML 塞一段 JS，让 Safari 去签：
- *   握手是 Safari 的、cf_clearance 指纹对得上、Turnstile 早过了、SW 顺手加 refract 签名。
+ * 所以这个脚本自己不签，只往 HTML 页面塞一段 JS，让 Safari 去签。
+ * 规则匹配全域但只处理 text/html，JS/CSS/JSON/图片一律放行。
  *
  * [Script] 见 nodeseek.sgmodule
  * [MITM]   hostname = %APPEND% www.nodeseek.com
@@ -81,16 +80,33 @@ function inject(body) {
 
 /* ------------------------------ response 分支 ------------------------------ */
 
+function headerOf(headers, name) {
+  if (!headers) return "";
+  const want = String(name).toLowerCase();
+  for (const k of Object.keys(headers)) {
+    if (String(k).toLowerCase() === want) return headers[k];
+  }
+  return "";
+}
+
 if (typeof $response !== "undefined") {
   try {
-    const body = $response.body || "";
-    const next = inject(body);
-    if (next === null) {
-      console.log(`[${NAME}] 已有注入标记，跳过`);
+    const body = String($response.body || "");
+    const ct = String(headerOf($response.headers || {}, "content-type") || "");
+
+    // 只处理 HTML：规则放宽到全域匹配后，JS/CSS/JSON/图片都会进这里，别乱塞
+    const isHtml = /text\/html/i.test(ct) || (!ct && /<!doctype html|<html[\s>]/i.test(body.slice(0, 400)));
+    if (!isHtml) {
       $done({});
     } else {
-      console.log(`[${NAME}] 注入成功，原长 ${body.length} → ${next.length}`);
-      $done({ body: next });
+      const next = inject(body);
+      if (next === null) {
+        console.log(`[${NAME}] 已有注入标记，跳过`);
+        $done({});
+      } else {
+        console.log(`[${NAME}] 注入成功，原长 ${body.length} → ${next.length}`);
+        $done({ body: next });
+      }
     }
   } catch (e) {
     console.log(`[${NAME}] 注入异常：${e}`);
