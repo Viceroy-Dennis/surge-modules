@@ -5,7 +5,10 @@
 #!category=自动任务
 
 [Script]
-# 1. 抓 Cookie：只匹配会员中心路径，避免刷首页时反复触发
+# 1a. 抓登录响应：登录成功那一刻的 Set-Cookie 直接存下来
+蜗牛4K抓登录 = type=http-response,pattern=^https?:\/\/(www\.)?wn4k\.com\/user\/login,argument={{{account}}},script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/wn4k/wn4k_task.js,script-update-interval=0
+
+# 1b. 抓普通请求：会员中心等页面上的 Cookie，多一层保险
 蜗牛4K抓Cookie = type=http-request,pattern=^https?:\/\/(www\.)?wn4k\.com\/user\/,argument={{{account}}},script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/wn4k/wn4k_task.js,script-update-interval=0
 
 # 2. 每天 09:14 自动签到（固定 09:14，避开整点并发）
