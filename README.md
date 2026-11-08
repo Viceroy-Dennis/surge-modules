@@ -39,19 +39,23 @@ https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/xianhua.sgmo
 
 ---
 
-## 3. 蜂巢每日签到 (pting.club)
+## 3. 蜂巢每日签到 (fengchao.chat / pting.club)
 
 **模块安装 URL**（Surge → 模块 → 安装 → 粘贴）：
 ```text
 https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/fengchao.sgmodule
 ```
 
+每天 **09:14（设备本地时区）**执行。支持 Surge iOS 5.9.0+ / Mac 5.5.0+，使用与已确认运行成功的 QX 版相同的查询、提交、复查流程。
+
 | 文件路径 | 说明 |
 |---|---|
-| `fengchao.sgmodule` | 模块本体：每日签到、Cookie 抓包、手动测试与体检入口 |
-| `fengchao/fengchao_task.js` | 每日自动签到（每天 09:14 执行，记录连续天数与积分） |
-| `fengchao/fengchao_test.js` | 综合体检与测试（检查 Cookie 状态、接口连通性、当前积分） |
-| `fengchao/fengchao_capture.js` | 登录 Cookie 抓包（自动剔除临时 WAF，捕获成功弹通知） |
+| `fengchao.sgmodule` | 每日签到、凭据采集、手动签到和只读状态查询入口 |
+| `fengchao/fengchao_task.js` | Surge 原生统一脚本；状态确认、超时不重发、蜂蜜奖励/余额与连续天数 |
+| `fengchao/README.md` | 安装、更新及凭据采集说明 |
+| `tests/fengchao.surge.mock.test.cjs` | 原生 Surge 回调与业务流程的离线模拟验证 |
+
+在 Surge 开启时用 Safari 登录蜂巢，再打开 `https://fengchao.chat/api/auth/me` 采集凭据。QX 与 Surge 存储独立，需单独采集。已有模块请更新模块与脚本缓存，并检查实际任务为 `cronexp="14 9 * * *"`。体检入口传入 `argument=diagnose`，只查询状态，不签到、不修改凭据。
 
 ---
 
