@@ -1,144 +1,83 @@
-// 三国咸话 —— 综合体检与状态诊断脚本 (Surge Generic 专用)
-// 用途: 一键诊断 wxforum (签到通道) 与 api-xh (任务/浏览通道) 的独立凭据健康状态及任务列表进度
-
-const NAME = "三国咸话测试";
-const HEADER_KEY = "sgxh_headers";
-const TOKEN_KEY = "sgxh_token";
-const TIME_KEY = "sgxh_capture_time";
-
+// 三国咸话 Surge 只读诊断：只查询社区任务列表，不执行任务或领取奖励。
+// Surge iOS 5.9+ / Mac 5.5+，使用原生 HTTP 回调并关闭自动 Cookie 与重定向。
+const NAME = "三国咸话体检";
 const LIST_URL = "https://api-xh.sanguosha.cn/task/sgxh-task/taskList";
+let completed = false;
+let watchdog = null;
+let token = "";
 
-const DROP = { host: 1, connection: 1, "keep-alive": 1, "proxy-connection": 1, "transfer-encoding": 1, "content-length": 1, "content-encoding": 1, "accept-encoding": 1 };
-
-function savedHeaders(isXh) {
-  let hdrRaw = "";
-  let tokRaw = "";
-
-  if (isXh) {
-    hdrRaw = $persistentStore.read("sgxh_headers_xh") || $persistentStore.read("sgxh_xh_headers") || $persistentStore.read(HEADER_KEY) || "{}";
-    tokRaw = $persistentStore.read("sgxh_token_xh") || $persistentStore.read("sgxh_xh_token") || $persistentStore.read(TOKEN_KEY) || "";
-  } else {
-    hdrRaw = $persistentStore.read("sgxh_headers_wx") || $persistentStore.read("sgxh_wx_headers") || $persistentStore.read(HEADER_KEY) || "{}";
-    tokRaw = $persistentStore.read("sgxh_token_wx") || $persistentStore.read("sgxh_wx_token") || $persistentStore.read(TOKEN_KEY) || "";
+function safeText(value) {
+  let text = String(value === undefined || value === null ? "" : value);
+  for (const credential of [token, token.replace(/^Bearer\s+/i, "")]) {
+    if (credential) text = text.split(credential).join("[已隐藏]");
   }
-
-  let saved = {};
-  try { saved = JSON.parse(hdrRaw); } catch (e) {}
-
-  const h = {};
-  for (const key in saved) {
-    const k = String(key).toLowerCase();
-    if (DROP[k]) continue;
-    if (saved[key] === undefined || saved[key] === null || saved[key] === "") continue;
-    h[k] = String(saved[key]);
-  }
-  if (tokRaw && !h.authorization && !h.token && !h["x-token"]) {
-    h.authorization = tokRaw;
-  }
-  return h;
+  return text.replace(/<[^>]*>/g, "").replace(/Bearer\s+[\w.+/~=-]+/gi, "[已隐藏]")
+    .replace(/eyJ[\w-]+\.[\w-]+\.[\w-]+/g, "[已隐藏]")
+    .replace(/https?:\/\/[^\s]+\?[^\s]+/g, "[链接]").replace(/[\r\n]+/g, " ").slice(0, 90);
 }
 
-function getJson(url, isXh, timeoutMs = 4000) {
-  return new Promise((resolve) => {
-    let finished = false;
-    const timer = setTimeout(() => {
-      if (!finished) {
-        finished = true;
-        resolve({ url, status: 0, error: `网络请求超时(${timeoutMs}ms)`, body: "" });
-      }
-    }, timeoutMs);
-
-    $httpClient.get({
-      url: url,
-      headers: savedHeaders(isXh)
-    }, (error, response, body) => {
-      if (!finished) {
-        finished = true;
-        clearTimeout(timer);
-        if (error) {
-          resolve({ url, status: 0, error: String(error), body: "" });
-        } else {
-          resolve({
-            url,
-            status: Number(response && (response.status || response.statusCode)) || 0,
-            error: "",
-            body: String(body || "")
-          });
-        }
-      }
-    });
-  });
+function status(task) {
+  return { "-1": "未完成", "0": "未完成", "1": "待领取", "2": "已领取" }[String(task.progressStatus)] || "状态未知";
 }
 
-function parseJSON(body) {
-  try { return JSON.parse(body || "{}"); } catch (e) { return null; }
+function finish(title, text) {
+  if (completed) return;
+  completed = true;
+  if (watchdog !== null) clearTimeout(watchdog);
+  try {
+    console.log("[" + NAME + "] " + text);
+    $notification.post(NAME, title, text);
+  } catch (ignored) {
+    // 通知不可用时仍结束脚本，不重复查询。
+  } finally {
+    $done();
+  }
 }
 
-async function main() {
-  console.log(`[${NAME}] ========== 开始诊断 ==========`);
-  const rows = [];
-
-  const genTok = $persistentStore.read(TOKEN_KEY) || "";
-  const wxTok = $persistentStore.read("sgxh_token_wx") || $persistentStore.read("sgxh_wx_token") || genTok;
-  const xhTok = $persistentStore.read("sgxh_token_xh") || $persistentStore.read("sgxh_xh_token") || "";
-  const capTime = $persistentStore.read(TIME_KEY);
-  const rewardUrl = $persistentStore.read("sgxh_confirmed_reward_url") || "";
-
-  rows.push("🔑 双通道凭据捕获状态:");
-  rows.push(`  • 签到通道 (wxforum): ${wxTok ? `✅ 已具备 (长 ${wxTok.length} 位)` : "❌ 缺失"}`);
-  rows.push(`  • 社区/任务通道 (api-xh): ${xhTok ? `✅ 已具备 (长 ${xhTok.length} 位)` : "⚠️ 尚未捕获"}`);
-  if (rewardUrl) {
-    rows.push(`  • 🎯 领奖端点: 已锁定 ${rewardUrl.replace(/^https?:\/\/[^/]+/i, "")}`);
+function inspect() {
+  token = $persistentStore.read("sgxh_token_xh") || $persistentStore.read("sgxh_token_wx") || $persistentStore.read("sgxh_token") || "";
+  if (!token) {
+    finish("缺少凭据", "请在 Surge 启用三国咸话模块，并在小程序打开福利页和热力竹页面。");
+    return;
   }
-
-  if (capTime) {
-    const d = new Date(Number(capTime));
-    rows.push(`🕒 最近捕获时间: ${d.toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}`);
-  }
-
-  // 测试任务列表
-  console.log(`[${NAME}] 正在测试 api-xh 任务列表...`);
-  const res = await getJson(LIST_URL, true, 4000);
-
-  rows.push("\n📡 api-xh 任务网关实测:");
-  if (res.status === 200) {
-    rows.push(`  • 接口状态: 🟢 连通正常 (HTTP 200)`);
-    const j = parseJSON(res.body);
-    const tasks = (j && j.data) || [];
-    rows.push(`  • 识别任务数: ${tasks.length} 项`);
-
-    // 格式化输出目标核心任务
-    const targets = tasks.filter(t => /浏览|点赞|分享|签到/i.test(String(t.taskName || t.taskDesc || "")));
-    if (targets.length) {
-      rows.push("📋 今日核心任务状态:");
-      targets.forEach(t => {
-        const name = t.taskName || t.taskDesc || t.taskId;
-        const cur = t.progress !== undefined ? t.progress : (t.current !== undefined ? t.current : "-");
-        const total = t.total !== undefined ? t.total : (t.target !== undefined ? t.target : "-");
-        const isRec = t.isReceive === 1 || t.isReceived === 1 || t.receiveStatus === 2 || t.status === 2;
-        const statusTxt = isRec ? "✅ 已领取" : "⏳ 待领取/进行中";
-        rows.push(`  • ${name}: 进度 ${cur}/${total} [${statusTxt}]`);
-      });
+  watchdog = setTimeout(() => finish("查询超时", "未执行任务或领奖操作，请检查网络后重试。"), 12000);
+  $httpClient.get({
+    url: LIST_URL,
+    headers: {
+      authorization: token, "app-code": "2", platform: "weixin", "app-system": "weixin",
+      "app-version": "8.0.0", "appversion-code": "800", "current-uri": "subPackages/index/welfare/welfare",
+      accept: "application/json"
+    },
+    timeout: 10,
+    "auto-cookie": false,
+    "auto-redirect": false
+  }, (error, response, data) => {
+    if (completed) return;
+    if (error) {
+      finish("网络请求失败", "未执行任务或领奖操作，请检查网络后重试。");
+      return;
     }
-  } else if (res.status === 401 || (res.body && res.body.includes("token已经过期"))) {
-    rows.push(`  • 接口状态: 🔴 401 凭据缺失或已过期`);
-    rows.push(`  • 💡 解决办法: 请在小程序里随便点进一个【帖子】或点击【社区】页面，即可自动抓取 api-xh 凭据！`);
-  } else {
-    rows.push(`  • 接口状态: 🟡 HTTP ${res.status} ${String(res.body).slice(0, 60)}`);
-  }
-
-  const text = rows.join("\n");
-  console.log(`[${NAME}]\n${text}`);
-  $notification.post(NAME, xhTok ? "咸话体检正常 🟢" : "咸话凭据体检", text);
-  $done({ summary: text });
+    const code = Number(response && response.status) || 0;
+    let json;
+    try { json = JSON.parse(data || "{}"); } catch (ignored) {}
+    if (code !== 200 || !json || String(json.code) !== "1000" || json.success === false || !Array.isArray(json.data)) {
+      finish("查询失败", "HTTP " + code + "，请检查凭据和网络。");
+      return;
+    }
+    const lines = json.data.filter(task => task && typeof task === "object").map(task => {
+      const cycle = { 1: "每日", 2: "每周", 3: "一次性/累计" }[Number(task.taskType)] || "其他";
+      const label = safeText(task.taskDesc || task.taskName || task.taskId || "任务");
+      const current = task.currentProgressValue == null ? "?" : safeText(task.currentProgressValue);
+      const target = task.targetProgressValue == null ? "?" : safeText(task.targetProgressValue);
+      return "[" + cycle + "] " + label + ": " + current + "/" + target + " | " + status(task);
+    });
+    finish("任务列表（只查询）", lines.join("\n") || "服务器未返回任务。");
+  });
 }
 
-if (typeof $httpClient === "undefined") {
-  $done({ summary: "请在 Surge 环境中运行" });
-} else {
-  main().catch((e) => {
-    console.log(`[${NAME}] 异常: ${e}`);
-    $notification.post(NAME, "测试异常", String(e));
-    $done({ summary: `异常: ${e}` });
-  });
+try {
+  inspect();
+} catch (e) {
+  // 不打印可能包含 token 的原始网络或存储异常。
+  finish("诊断未完成", "请检查 Surge 本机凭据与网络；未执行任务或领奖操作。");
 }
