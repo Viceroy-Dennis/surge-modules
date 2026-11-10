@@ -1,6 +1,6 @@
 # GLaDOS 多账号签到 · Surge
 
-GitHub 仓库中的配套文件为 `glados.sgmodule` 和 `glados/glados-checkin.js`。适用于 **Surge iOS 5.9+ / Surge Mac 5.5+**，每天 **09:14，运行设备本地时区** 执行。脚本按账号保存登录凭据，汇总签到结果、积分和剩余天数。
+GitHub 仓库中的配套文件为 `glados.sgmodule` 和 `glados/glados-checkin.js`。每天 **09:14，运行设备本地时区** 执行。脚本按账号保存登录凭据，汇总签到结果、积分和剩余天数。模块需要支持 `full-header-mode` 的 Surge：**Mac 6.0+**；iOS 需要支持该参数的新版，尚未从官方发布记录确认其最低版本，不能仅凭 iOS 5.9 的模块参数支持推断完整头部模式也可用。
 
 ## 安装
 
@@ -12,17 +12,17 @@ GitHub 仓库中的配套文件为 `glados.sgmodule` 和 `glados/glados-checkin.
 https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/glados.sgmodule
 ```
 
-模块已经引用以下脚本地址，无需另行修改 `script_url`：
+模块将捕获和定时任务绑定到同一个固定提交的脚本地址，防止模块更新后仍运行旧 URL 缓存。模块已移除 `script_url` 参数；以后更新功能应更新模块。脚本的最新内容仍可通过以下 Raw 地址查看：
 
 ```text
 https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/glados/glados-checkin.js
 ```
 
-启用模块后，开启 MITM，安装并信任 Surge CA 证书，再按下文添加账号。更新时同时刷新模块和脚本缓存。
+启用模块后，开启 MITM，安装并信任 Surge CA 证书，再按下文添加账号。升级旧模块后，确认 `GLaDOS-Capture` 与 `GLaDOS-Checkin` 的 `script-path` 均包含 `daa6a0d284dc6eecb002ef3da20e406a1eec11c1`，捕获参数为 `capture_notify=always`。若仍看到旧 `script_url` 参数或旧地址，说明模块内容尚未刷新；不要同时启用两个 GLaDOS 模块。
 
 ### 本地文件方式
 
-1. 下载模块和 `glados-checkin.js`，放进 **Surge 当前配置文件所在目录**。将模块参数 `script_url` 改为 `glados-checkin.js`；相对路径以配置目录为基准。
+1. 下载模块和 `glados-checkin.js`，放进 **Surge 当前配置文件所在目录**。将模块两个条目中的 `script-path` 都改为 `glados-checkin.js`；相对路径以配置目录为基准。
 2. 在 Surge 的模块管理中添加并启用本地模块。聊天压缩包中的模块文件名为 `glados-checkin.sgmodule`，与仓库中的 `glados.sgmodule` 内容相同。
 3. 在 Surge 中启用 **MITM**，按应用指引安装并信任其 CA 证书。iOS 安装描述文件后，还需在系统「设置 → 通用 → 关于本机 → 证书信任设置」启用该证书的完全信任。
 4. 确认模块的捕获脚本和定时脚本均已启用，允许 Surge 发送通知。
@@ -32,7 +32,7 @@ iOS 若不方便把文件放进配置目录，直接使用上面的 URL 安装�
 ### 自行托管方式
 
 1. 将 `glados-checkin.js` 放到你能管理的 HTTPS 托管位置，取得直接返回 JavaScript 内容的 **Raw 地址**，不能使用代码预览页面地址。
-2. 编辑模块的 `#!arguments=` 行，将 `script_url:` 后的默认地址替换为你托管的真实 Raw 地址。
+2. 编辑模块，将两个条目中的 `script-path` 都替换为你托管的真实 Raw 地址。建议每次发布使用不同的版本路径，以免脚本缓存与模块不同步。
 3. 将修改后的模块也托管为 HTTPS 原始文件，在 Surge 模块管理中通过该模块 URL 安装并启用。
 4. 完成上述 MITM 证书、信任与通知设置。
 
@@ -54,6 +54,17 @@ iOS 若不方便把文件放进配置目录，直接使用上面的 URL 安装�
 
 没有添加通知时，先检查 MITM 是否生效、CA 证书是否已信任、浏览器流量是否经过 Surge，以及页面是否真正请求了 `/api/user/status`。未登录、非 JSON 响应或缺少账号身份的响应不会入库。可以在已登录的同一浏览器中打开该域名下的 `/api/user/status` 验证；不要把包含账号信息的响应公开分享。
 
+### 抓取没有反应时
+
+保持模块 `capture_notify=always`，在**已经登录的同一浏览器、同一域名**，将地址栏路径改成 `/api/user/status?capture=1` 并打开。再次测试时更换末尾数字，例如 `capture=2`，让浏览器发起新请求。
+
+- 显示「已添加账号」「账号凭据已更新」或「已捕获，凭据未变化」都说明捕获成功。最后一种只确认凭据已在本地，不代表签到接口一定接受它。
+- 显示「捕获已触发，未保存账号」时，按通知中的 HTTP、登录、JSON、身份或凭据提示处理。
+- 查看 **GLaDOS-Capture** 脚本日志或该请求的备注，应看到 `[GLaDOS Capture] build=20261110-capture-1`。日志只记录固定原因、脱敏账号以及头部格式／字段是否存在，不打印凭据、完整邮箱、User-Agent 值或查询参数。
+- 如果没有该入口日志，检查脚本加载错误、Surge 版本、MITM 是否解密及模块是否启用。Surge 对同一请求只执行配置顺序中第一个匹配的 `http-response` 脚本，其他 GLaDOS 脚本可能先匹配。排查只需提供平台、版本和脱敏的捕获日志／请求备注，不需要发送原始请求头或存储。
+
+模块捕获条目的 `debug=true` 让脚本日志也出现在请求备注；它不会强制重新下载远程脚本。远程脚本默认缓存更新间隔为 86400 秒，因此模块采用固定提交地址来区分发布版本。
+
 ## 定时与通知
 
 模块中默认任务为：
@@ -74,6 +85,8 @@ cronexp="14 9 * * *"
 
 该参数只控制签到汇总。账号捕获、手动管理、没有账号及配置错误仍会通知。通知最多展示前 12 个账号，完整结果在 Surge 脚本日志中。
 
+`capture_notify` 单独控制捕获反馈：模块默认 `always`，即使凭据未变也确认捕获，相关未保存原因也通知；设为 `changes` 后，仅新增、变化或异常时通知，未变化及普通跳过原因仍写日志。脚本不带该参数单独运行时默认 `changes`。
+
 ## 手动管理账号
 
 在你可编辑的配置文件 `[Script]` 段添加单独的管理脚本；如果已有该段，只添加条目。`type=generic` 不会定时执行，需要从 Surge 脚本列表手动运行。
@@ -82,14 +95,14 @@ cronexp="14 9 * * *"
 
 ```ini
 [Script]
-GLaDOS-Accounts = type=generic, script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/glados/glados-checkin.js, argument="mode=list", timeout=10
+GLaDOS-Accounts = type=generic, script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/daa6a0d284dc6eecb002ef3da20e406a1eec11c1/glados/glados-checkin.js, argument="mode=list", timeout=10
 ```
 
 删除编号为 `1` 的本地账号：
 
 ```ini
 [Script]
-GLaDOS-Remove = type=generic, script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/glados/glados-checkin.js, argument="mode=remove&id=1", timeout=10
+GLaDOS-Remove = type=generic, script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/daa6a0d284dc6eecb002ef3da20e406a1eec11c1/glados/glados-checkin.js, argument="mode=remove&id=1", timeout=10
 ```
 
 先运行列表确认编号，再将 `id=1` 改为要删除的编号并手动运行一次，随后移除删除条目。本地文件方式可将上述 `script-path` 改为 `glados-checkin.js`。**不要把 `mode=remove` 放进定时签到任务。** 删除只移除本机保存的该账号，不删除网站账号；其余编号保持不变。若再次登录并触发捕获，该账号会重新添加。
@@ -111,7 +124,7 @@ GLaDOS-Remove = type=generic, script-path=https://raw.githubusercontent.com/Vice
 
 ## 从旧脚本更新后恢复失败账号
 
-1. **同时更新模块和远程脚本缓存。** 捕获条目应包含 `full-header-mode=true`，以保留重复的 `Set-Cookie` 字段。Raw 地址没有变化。
+1. **更新模块并确认配套脚本地址已变化。** 两个条目的脚本 URL 应含上面给出的固定提交，捕获条目应包含 `full-header-mode=true` 和 `capture_notify=always`。模块的订阅 Raw 地址没有变化。
 2. 保留已成功账号；为失败账号分别使用独立浏览器会话重新登录，刷新 `/console/checkin`，看到「账号凭据已更新」或「已添加账号」后立即手动运行一次。
 3. 邮箱在通知中仅显示前一至两个字符，**脱敏标签相同不等于完整邮箱相同**。不要据此删号；重新捕获时会按完整身份更新或合并。确需删除时用上面的列表与指定编号操作。
 4. 若仍失败，查看新日志中的认证或设备提示。排查时只需提供脱敏日志，不需要提供 Cookie、Authorization 或完整存储。
@@ -124,6 +137,7 @@ GLaDOS-Remove = type=generic, script-path=https://raw.githubusercontent.com/Vice
 - [Surge 脚本总览](https://manual.nssurge.com/scripting/overview.html)
 - [Surge 模块与参数](https://manual.nssurge.com/profile/module.html)
 - [Surge HTTP Response 脚本](https://manual.nssurge.com/scripting/http-response.html)
+- [Surge Mac 6 发布说明：完整头部模式](https://kb.nssurge.com/surge-knowledge-base/release-notes/surge-mac-6-release-note)
 - [Surge Cron 脚本](https://manual.nssurge.com/scripting/cron.html)
 - [Surge MITM](https://manual.nssurge.com/http/mitm.html)
 - [社区 GLaDOS 签到实现](https://github.com/Walvez/glados-auto-checkin)
