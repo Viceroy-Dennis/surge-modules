@@ -1,11 +1,11 @@
 #!name=GLaDOS 多账号签到
-#!desc=登录后刷新控制台保存账号；每天 09:14（设备本地时区）签到，汇总积分、剩余天数和异常。需 Surge iOS 5.9+ / Mac 5.5+。
-#!arguments=script_url:https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/glados/glados-checkin.js,notify:always
-#!arguments-desc=script_url：Surge 配置目录中的脚本文件名，或自行托管的 HTTPS 原始脚本地址。notify：always 每次通知，failure 仅异常通知，off 关闭签到汇总通知。登录捕获仍会通知。
+#!desc=登录后刷新控制台保存账号；每天 09:14（设备本地时区）签到。捕获有明确反馈。需支持 full-header-mode 的 Surge iOS 或 Mac 6+。
+#!arguments=notify:always,capture_notify:always
+#!arguments-desc=notify：always 每次签到通知，failure 仅异常通知，off 关闭签到汇总。capture_notify：always 显示每次有效捕获及未保存原因，changes 仅新增或变化时通知。模块固定使用配套脚本版本，更新脚本请更新模块。
 
 [Script]
-GLaDOS-Capture = type=http-response, pattern=^https:\/\/(?:glados\.(?:network|rocks|one|space|cloud|vip)|glados-facility\.com)\/api\/user\/status\/?(?:\?|$), requires-body=true, max-size=65536, full-header-mode=true, script-path={{{script_url}}}, timeout=10
-GLaDOS-Checkin = type=cron, cronexp="14 9 * * *", script-path={{{script_url}}}, argument="notify={{{notify}}}", timeout=180, wake-system=true
+GLaDOS-Capture = type=http-response, pattern=^https:\/\/(?:glados\.(?:network|rocks|one|space|cloud|vip)|glados-facility\.com)\/api\/user\/status\/?(?:\?|$), requires-body=true, max-size=65536, full-header-mode=true, script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/daa6a0d284dc6eecb002ef3da20e406a1eec11c1/glados/glados-checkin.js, argument="capture_notify={{{capture_notify}}}", timeout=10, debug=true
+GLaDOS-Checkin = type=cron, cronexp="14 9 * * *", script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/daa6a0d284dc6eecb002ef3da20e406a1eec11c1/glados/glados-checkin.js, argument="notify={{{notify}}}", timeout=180, wake-system=true
 
 [MITM]
 hostname = %APPEND% glados.network, glados.rocks, glados.one, glados.space, glados.cloud, glados.vip, glados-facility.com
