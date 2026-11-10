@@ -125,15 +125,19 @@ https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/wn4k.sgmodul
 
 | 文件路径 | 说明 |
 |---|---|
-| `wn4k.sgmodule` | 模块本体：Cookie 抓包 + 每天 09:14 自动签到 + 手动入口 |
-| `wn4k/wn4k_task.js` | 主脚本（抓包 / 签到双模式，MacCMS 登录 + 签到接口） |
-| `tests/wn4k.surge.mock.test.js` | 本地 mock 回归测试（14 条断言） |
+| `wn4k.sgmodule` | Cookie 采集、每天 09:14 自动签到、手动签到和本地诊断 |
+| `wn4k/wn4k_checkin.js` | 基于当前 QX 版改写的 Surge 原生多账号签到脚本 |
+| `wn4k/README.md` | 安装、采集凭据、更新和诊断说明 |
+| `tests/wn4k.surge.checkin.test.cjs` | Surge 原生回调、多账号及超时的离线验证 |
 
-- **站点**：MacCMS V10 + 盘链模板。登录 `POST /user/login.html`、签到 `POST /user/checkin.html`，无验证码。
-- **使用方法**：
-  1. 安装模块（会往 MITM 追加 `wn4k.com, www.wn4k.com`）。
-  2. 浏览器登录 wn4k.com，打开一次「会员中心」任意页面 → 通知「凭据已更新」。
-  3. 之后每天 **09:14** 自动签到；签到成功当天不再重复请求。
-- **想用账号密码**（Cookie 过期时脚本能自己重登）：模块 → 蜗牛4K → 参数 `account` 填 `账号,密码`，多账号用 `&&` 分隔；留 `none` 只用抓包 Cookie。
+支持 **Surge iOS 5.9.0+ / Mac 5.5.0+**。安装后启用 MITM 并信任证书，用 Safari 登录 wn4k.com，再打开会员中心或签到页面采集 Cookie。多账号逐个登录采集后，运行一次“蜗牛4K手动签到”；之后每天 **09:14（设备本地时区）**自动执行。
+
+自动脚本 raw 链接：
+
+```text
+https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/wn4k/wn4k_checkin.js
+```
+
+签到采用空请求体 `POST /user/checkin.html`，按账号独立保存凭据及日期；本地诊断不发送网络请求。QX 和旧 Surge 版用户需重新采集凭据，当前模块不使用账号密码参数。更新时刷新模块与脚本缓存，确认入口指向 `wn4k_checkin.js`。详见 [安装说明](wn4k/README.md)。
 
 ---
