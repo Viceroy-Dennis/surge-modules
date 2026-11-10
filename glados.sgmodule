@@ -4,7 +4,7 @@
 #!arguments-desc=script_url：Surge 配置目录中的脚本文件名，或自行托管的 HTTPS 原始脚本地址。notify：always 每次通知，failure 仅异常通知，off 关闭签到汇总通知。登录捕获仍会通知。
 
 [Script]
-GLaDOS-Capture = type=http-response, pattern=^https:\/\/(?:glados\.(?:network|rocks|one|space|cloud|vip)|glados-facility\.com)\/api\/user\/status\/?(?:\?|$), requires-body=true, max-size=65536, script-path={{{script_url}}}, timeout=10
+GLaDOS-Capture = type=http-response, pattern=^https:\/\/(?:glados\.(?:network|rocks|one|space|cloud|vip)|glados-facility\.com)\/api\/user\/status\/?(?:\?|$), requires-body=true, max-size=65536, full-header-mode=true, script-path={{{script_url}}}, timeout=10
 GLaDOS-Checkin = type=cron, cronexp="14 9 * * *", script-path={{{script_url}}}, argument="notify={{{notify}}}", timeout=180, wake-system=true
 
 [MITM]

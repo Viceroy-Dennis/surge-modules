@@ -2,6 +2,7 @@
  * GLaDOS 多账号签到 — Surge iOS 5.9+ / Mac 5.5+
  * 配合 glados.sgmodule 使用；每天 09:14，设备本地时区。
  * 登录后刷新控制台，捕获 /api/user/status 的有效响应以保存账号。
+ * 捕获与签到均接收会话 Cookie 轮换；模块须启用 full-header-mode。
  * 凭据仅存于本机 Surge $persistentStore；不要分享其存储导出。
  * 参数：notify=always|failure|off；手动管理：mode=list / mode=remove&id=1。
  */
@@ -15,6 +16,9 @@
   var ACCOUNT_INTERVAL_MS = 400;
   var CHALLENGE_WAIT_MS = 2700;
   var PROOF_SUFFIX = ".glados-observe-v1";
+  var SESSION_NAMES = ["gld:sess", "gld:sess.sig", "koa:sess", "koa:sess.sig"];
+  var API_PATHS = ["/api/user/checkin/challenge", "/api/user/checkin", "/api/user/status", "/api/user/points"];
+  var CLEARED_MESSAGE = "服务端已清除会话或会话不完整，请重新登录并抓取";
   var HOSTS = [
     "glados.network", "glados.rocks", "glados.one", "glados.space",
     "glados.cloud", "glados.vip", "glados-facility.com"
@@ -67,18 +71,162 @@
     return /^\d{3}$/.test(String(status)) ? Number(status) : 0;
   }
 
-  function header(headers, name) {
-    var keys = Object.keys(headers || {});
-    for (var i = 0; i < keys.length; i++) {
-      if (keys[i].toLowerCase() === name.toLowerCase()) {
-        return typeof headers[keys[i]] === "string" ? headers[keys[i]].trim() : "";
-      }
+  function headerValues(headers, name) {
+    var values = [];
+    function add(field, value) {
+      if (typeof field !== "string" || field.toLowerCase() !== name.toLowerCase()) return;
+      (Array.isArray(value) ? value : [value]).forEach(function (item) {
+        if (typeof item === "string") values.push(item.trim());
+      });
     }
-    return "";
+    if (Array.isArray(headers)) {
+      headers.forEach(function (item) { if (isObject(item)) add(item.field, item.value); });
+    } else {
+      Object.keys(headers || {}).forEach(function (key) { add(key, headers[key]); });
+    }
+    return values;
+  }
+
+  function header(headers, name) {
+    var values = headerValues(headers, name);
+    // HTTP/2 可把 Cookie 拆成多条字段；不能只保存第一条。
+    return name.toLowerCase() === "cookie" ? values.join("; ") : (values[0] || "");
   }
 
   function validHeader(value) {
-    return typeof value === "string" && !/[\r\n]/.test(value);
+    return typeof value === "string" && !/[\r\n\0]/.test(value);
+  }
+
+  function cookieJar(cookie) {
+    var jar = Object.create(null);
+    cookie.split(";").forEach(function (part) {
+      var pos = part.indexOf("=");
+      if (pos < 1) return;
+      var name = part.slice(0, pos).trim();
+      var value = part.slice(pos + 1).trim();
+      if (SESSION_NAMES.indexOf(name) !== -1 && jar[name] !== undefined && jar[name] !== value) {
+        throw publicError("会话 Cookie 字段冲突，请重新登录并抓取");
+      }
+      if (/^[!#$%&'*+.^_`|~0-9A-Za-z:-]+$/.test(name) && /^[\x21-\x7e]*$/.test(value) && !/[,"\\]/.test(value)) {
+        jar[name] = value;
+      }
+    });
+    return jar;
+  }
+
+  function incompleteSession(jar) {
+    var pair = (jar["gld:sess"] !== undefined || jar["gld:sess.sig"] !== undefined) ?
+      SESSION_NAMES.slice(0, 2) : SESSION_NAMES.slice(2);
+    var present = pair.some(function (name) { return jar[name] !== undefined; });
+    return present && !pair.every(function (name) { return !!jar[name]; });
+  }
+
+  function mergeSessionCookies(cookie, headers, host, requestPath) {
+    var jar = cookieJar(cookie);
+    var hadCurrent = jar["gld:sess"] !== undefined || jar["gld:sess.sig"] !== undefined;
+    var touched = false;
+    var touchedCurrent = false;
+    headerValues(headers, "Set-Cookie").forEach(function (value) {
+      // Expires 中的日期逗号不分割；只在后面确有 cookie-name= 时分割。
+      value.split(/,(?=\s*[^;,=\s]+\s*=)/).forEach(function (raw) {
+        var parts = raw.split(";");
+        var pos = parts[0].indexOf("=");
+        if (pos < 1) return;
+        var name = parts[0].slice(0, pos).trim();
+        if (SESSION_NAMES.indexOf(name) === -1) return;
+        var attributes = Object.create(null);
+        parts.slice(1).forEach(function (part) {
+          var at = part.indexOf("=");
+          if (at > 0) attributes[part.slice(0, at).trim().toLowerCase()] = part.slice(at + 1).trim();
+        });
+        var domain = (attributes.domain || "").replace(/^\./, "").toLowerCase();
+        // 当前允许域名均为独立注册域，拒绝兄弟域和公共后缀。
+        if (domain && domain !== host) return;
+        var defaultPath = requestPath.slice(0, requestPath.lastIndexOf("/")) || "/";
+        var path = attributes.path || defaultPath;
+        if (path.charAt(0) !== "/" || !API_PATHS.every(function (endpoint) {
+          return endpoint === path || endpoint.indexOf(path.replace(/\/$/, "") + "/") === 0;
+        })) return;
+        if (!validHeader(raw)) throw publicError("服务端返回无效会话 Cookie，请重新登录并抓取");
+        touched = true;
+        if (name.indexOf("gld:") === 0) touchedCurrent = true;
+        var expired = false;
+        if (attributes["max-age"] !== undefined) {
+          if (!/^-?\d+$/.test(attributes["max-age"])) throw publicError("会话有效期格式异常，请重新登录并抓取");
+          expired = Number(attributes["max-age"]) <= 0;
+        } else if (attributes.expires !== undefined) {
+          var expires = Date.parse(attributes.expires);
+          if (!isFinite(expires)) throw publicError("会话有效期格式异常，请重新登录并抓取");
+          expired = expires <= Date.now();
+        }
+        var next = parts[0].slice(pos + 1).trim();
+        if (expired || !next) {
+          delete jar[name];
+        } else {
+          if (!/^[\x21-\x7e]+$/.test(next) || /[,"\\]/.test(next)) {
+            throw publicError("服务端返回无效会话 Cookie，请重新登录并抓取");
+          }
+          jar[name] = next;
+        }
+      });
+    });
+    // 按最终会话判断，允许清理旧 koa 字段和同一响应先删除后重设。
+    // 已使用 gld 的账号不能在 gld 被删除后悄悄退回旧 koa 会话。
+    var current = hadCurrent || touchedCurrent || jar["gld:sess"] !== undefined || jar["gld:sess.sig"] !== undefined;
+    var pair = current ? SESSION_NAMES.slice(0, 2) : SESSION_NAMES.slice(2);
+    if ((touched && !pair.every(function (name) { return !!jar[name]; })) || incompleteSession(jar)) {
+      return { cookie: "", cleared: true };
+    }
+    if (!touched) return { cookie: cookie, cleared: false };
+    return { cookie: Object.keys(jar).map(function (name) { return name + "=" + jar[name]; }).join("; "), cleared: false };
+  }
+
+  function runtimeWarning(account, message) {
+    if (account._runtime.warnings.indexOf(message) === -1) account._runtime.warnings.push(message);
+  }
+
+  function persistSession(account) {
+    var runtime = account._runtime;
+    if (runtime.blocked) return;
+    try {
+      // 每次回读，只改本账号；同步比较旧快照，避免用启动时的整库覆盖捕获结果。
+      var fresh = loadStore();
+      var index = fresh.accounts.findIndex(function (item) { return item.id === account.id; });
+      if (index < 0 || JSON.stringify(fresh.accounts[index]) !== runtime.saved) {
+        runtime.blocked = true;
+        runtimeWarning(account, "本地账号已更新或删除，保留新记录，未回写本轮会话");
+        return;
+      }
+      var record = fresh.accounts[index];
+      record.cookie = account.cookie;
+      if (account.sessionCleared) {
+        record.authorization = "";
+        record.sessionCleared = true;
+      }
+      saveStore(fresh);
+      runtime.saved = JSON.stringify(record);
+    } catch (_) {
+      runtimeWarning(account, "更新后的会话未能保存，请检查 Surge 存储并重新抓取");
+    }
+  }
+
+  function receiveSession(account, headers, path) {
+    var update;
+    try {
+      update = mergeSessionCookies(account.cookie, headers, account.host, path);
+    } catch (error) {
+      account._runtime.error = error.publicMessage || "会话更新异常，请重新登录并抓取";
+      update = { cookie: "", cleared: true };
+    }
+    if (update.cookie === account.cookie && !update.cleared) return;
+    account.cookie = update.cookie;
+    if (update.cleared) {
+      account.sessionCleared = true;
+      account.authorization = "";
+      account._runtime.error = account._runtime.error || CLEARED_MESSAGE;
+      runtimeWarning(account, account._runtime.error);
+    }
+    persistSession(account);
   }
 
   function identity(data) {
@@ -120,7 +268,9 @@
           !!(account.email || account.userId) &&
           (!account.email || identity({ email: account.email }).email === account.email) &&
           validHeader(account.cookie) && validHeader(account.authorization) &&
-          validHeader(account.userAgent) && !!(account.cookie || account.authorization);
+          validHeader(account.userAgent) &&
+          (account.sessionCleared === undefined || typeof account.sessionCleared === "boolean") &&
+          !!(account.cookie || account.authorization || account.sessionCleared === true);
       });
     }
     if (!valid) {
@@ -153,29 +303,54 @@
     if ((!cookie && !authorization) || !validHeader(cookie) || !validHeader(authorization) ||
       !validHeader(userAgent)) return;
 
-    // 同步读取、合并、保存；定时签到不回写整份账号库。
+    var requestPath = $request.url.slice($request.url.indexOf("/", 8)).split("?")[0];
+    var session = mergeSessionCookies(cookie, $response.headers, host, requestPath);
+    // 只使用完整身份关联。脱敏显示相同不能作为合并依据。
     var store = loadStore();
     var incoming = { email: who.email, userId: who.userId, host: host };
-    var index = store.accounts.findIndex(function (account) { return sameAccount(account, incoming); });
-    var previous = index >= 0 ? store.accounts[index] : null;
+    var matches = store.accounts.filter(function (account) { return sameAccount(account, incoming); });
+    var knownEmails = matches.map(function (account) { return account.email; }).filter(Boolean);
+    if (knownEmails.some(function (email) { return email !== knownEmails[0]; })) {
+      throw publicError("同域账号 ID 对应多个邮箱，未覆盖记录，请用含完整邮箱的状态响应重新抓取");
+    }
+    if (session.cleared) {
+      var changed = false;
+      matches.forEach(function (item) {
+        // 捕获到的旧请求不能清除随后重新登录签发的新会话。
+        if (item.host === host && item.cookie === cookie && item.authorization === authorization && item.userAgent === userAgent) {
+          item.cookie = "";
+          item.authorization = "";
+          item.sessionCleared = true;
+          changed = true;
+        }
+      });
+      if (changed) saveStore(store);
+      throw publicError(CLEARED_MESSAGE);
+    }
+    cookie = session.cookie;
+    matches.sort(function (a, b) { return a.id - b.id; });
+    var previous = matches[0] || null;
     var account = {
       id: previous ? previous.id : store.nextId,
-      email: who.email || (previous ? previous.email : ""),
+      email: who.email || knownEmails[0] || "",
       userId: who.userId || (previous && previous.host === host ? previous.userId : ""),
       host: host,
       cookie: cookie,
       authorization: authorization,
       userAgent: userAgent
     };
-    if (previous && JSON.stringify(previous) === JSON.stringify(account)) return;
-    if (previous) store.accounts[index] = account;
-    else {
+    if (previous && matches.length === 1 && JSON.stringify(previous) === JSON.stringify(account)) return;
+    if (previous) {
+      store.accounts = store.accounts.filter(function (item) { return matches.indexOf(item) === -1 || item === previous; });
+      store.accounts[store.accounts.indexOf(previous)] = account;
+    } else {
       store.nextId += 1;
       store.accounts.push(account);
     }
     saveStore(store);
     notify(previous ? "账号凭据已更新" : "已添加账号", accountLabel(account) + " · " + host +
-      "\n当前共 " + store.accounts.length + " 个账号。可切换下一个账号并刷新控制台。");
+      "\n当前共 " + store.accounts.length + " 个账号。" +
+      (matches.length > 1 ? "已合并 " + (matches.length - 1) + " 条身份明确关联的重复记录。" : "可使用独立浏览器会话添加下一个账号。"));
   }
 
   function readArguments() {
@@ -206,7 +381,7 @@
   function manage(args, store) {
     if (args.mode === "list") {
       var lines = store.accounts.map(function (account) {
-        return accountLabel(account) + " · " + account.host;
+        return accountLabel(account) + " · " + account.host + (account.sessionCleared ? " · 需要重新抓取" : "");
       });
       var body = lines.length ? lines.join("\n") : "尚未保存账号，请登录 GLaDOS 后刷新控制台。";
       console.log("[GLaDOS] " + body);
@@ -222,6 +397,7 @@
   }
 
   function requestJson(account, method, path, body, deadline) {
+    if (account.sessionCleared) return Promise.resolve({ kind: "session", message: account._runtime.error || CLEARED_MESSAGE });
     var available = Math.floor((deadline - Date.now() - 250) / 1000);
     if (available < 1) return Promise.resolve({ kind: "budget" });
     var timeout = Math.min(REQUEST_TIMEOUT_SECONDS, available);
@@ -240,7 +416,8 @@
       headers: headers,
       timeout: timeout,
       "auto-cookie": false,
-      "auto-redirect": false
+      "auto-redirect": false,
+      "full-header-mode": true
     };
     if (body !== undefined) {
       headers["Content-Type"] = "application/json;charset=UTF-8";
@@ -262,6 +439,16 @@
           var status = statusCode(response);
           if (status < 200 || status >= 300) return settle({ kind: "http", status: status });
           var data = jsonObject(text);
+          if (data && !authenticationMessage(data) && (apiCode(data) === 0 ||
+            (path === "/api/user/checkin" && classify({ kind: "ok", data: data }).kind === "already"))) {
+            var matching = true;
+            if (path === "/api/user/status" && isObject(data.data)) {
+              var who = identity(data.data);
+              who.host = account.host;
+              matching = (!who.email && !who.userId) || sameAccount(account, who);
+            }
+            if (matching) receiveSession(account, response.headers, path);
+          }
           settle(data ? { kind: "ok", data: data } : { kind: "invalid_json" });
         });
       } catch (_) {
@@ -272,16 +459,27 @@
 
   function transportMessage(result, checkin) {
     var uncertain = checkin ? "，签到结果未确认" : "";
+    if (result.kind === "session") return result.message;
     if (result.kind === "budget") return "执行时间不足";
     if (result.kind === "timeout") return "请求超时" + uncertain;
     if (result.kind === "network") return "网络异常" + uncertain;
     if (result.kind === "invalid_json") return "响应不是有效 JSON，可能遇到验证页面" + uncertain;
-    if (result.status === 401) return "登录凭据失效，请重新登录并抓取";
+    if (result.status === 401) return "HTTP 401，会话认证被拒绝，请重新登录并抓取";
     if (result.status === 403) return "HTTP 403，访问被拒绝，请在浏览器检查登录或验证页面";
     if (result.status === 429) return "HTTP 429，请求过于频繁，请稍后再运行";
     if (result.status >= 300 && result.status < 400) return "接口发生重定向，请从当前可用域名重新登录并抓取";
     if (result.status >= 500) return "服务暂时异常（HTTP " + result.status + "）" + uncertain;
     return result.status ? "请求失败（HTTP " + result.status + "）" : "缺少有效 HTTP 状态" + uncertain;
+  }
+
+  function authenticationMessage(data) {
+    var message = typeof data.message === "string" ? data.message : "";
+    if (data.reason === "device-mismatch") return "登录设备校验未通过，请用原登录浏览器重新抓取 Cookie 和 User-Agent";
+    if (/automated check.in detected/i.test(message)) return "服务端拒绝自动签到，请在官网查看账号状态";
+    if (apiCode(data) === -2 || /not\s*log(?:ged\s*in|in)|unauthorized|invalid\s+(?:cookie|session)|token\s*(?:error|expired)|未登录|没有权限|登录.*(?:失效|过期)/i.test(message)) {
+      return "会话认证被拒绝" + (apiCode(data) === -2 ? "（code=-2）" : "") + "，请在原浏览器重新登录并抓取";
+    }
+    return "";
   }
 
   function classify(result) {
@@ -293,15 +491,8 @@
     var data = result.data;
     var code = apiCode(data);
     var message = typeof data.message === "string" ? data.message : "";
-    if (data.reason === "device-mismatch") {
-      return { kind: "failed", message: "登录设备校验未通过，请用原登录浏览器重新抓取凭据" };
-    }
-    if (/automated check.in detected/i.test(message)) {
-      return { kind: "failed", message: "服务端拒绝自动签到，请在官网查看账号状态" };
-    }
-    if (code === -2 || /not\s*log(?:ged\s*in|in)|unauthorized|token\s*(?:error|expired)|未登录|登录.*(?:失效|过期)/i.test(message)) {
-      return { kind: "failed", message: "登录凭据失效，请重新登录并抓取" };
-    }
+    var authentication = authenticationMessage(data);
+    if (authentication) return { kind: "failed", message: authentication };
     var already = /please\s+try\s+tomorrow|today['’]s observation logged|return tomorrow|already\s+(?:check|signed)|今日已签到|今天已(?:经)?签到|已经签到|重复签到|明天再试/i.test(message);
     if (already && (code === null || code === 0 || code === 1)) {
       return { kind: "already", message: "今日已签到" };
@@ -377,6 +568,7 @@
   }
 
   async function submitCheckin(account, deadline) {
+    if (account.sessionCleared) return { kind: "failed", message: "未提交签到：" + (account._runtime.error || CLEARED_MESSAGE) };
     if (deadline - Date.now() < CHALLENGE_WAIT_MS + 1500) {
       return { kind: "skipped", message: "执行时间不足，未提交签到" };
     }
@@ -390,7 +582,9 @@
     var code = apiCode(data);
     var nonce = data.nonce;
     var ttl = data.ttl === undefined ? 300000 : data.ttl;
-    if (code === -2) return { kind: "failed", message: "未提交签到：登录凭据失效，请重新抓取" };
+    var authentication = authenticationMessage(data);
+    if (authentication) return { kind: "failed", message: "未提交签到：" + authentication };
+    if (account.sessionCleared) return { kind: "failed", message: "未提交签到：" + (account._runtime.error || CLEARED_MESSAGE) };
     if (code !== 0 || typeof nonce !== "string" || !nonce.length || nonce.length > 4096 ||
       typeof ttl !== "number" || !isFinite(ttl) || ttl <= 0) {
       return { kind: "failed", message: "未提交签到：没有取得有效签到验证" };
@@ -426,16 +620,16 @@
   }
 
   async function addDetails(result, deadline) {
+    if (result.account.sessionCleared) {
+      runtimeWarning(result.account, result.account._runtime.error || CLEARED_MESSAGE);
+      return;
+    }
     if (deadline - Date.now() < 1500) {
       result.warnings.push("执行时间不足，未查询积分和天数");
       return;
     }
-    var responses = await Promise.all([
-      requestJson(result.account, "get", "/api/user/status", undefined, deadline),
-      requestJson(result.account, "get", "/api/user/points", undefined, deadline)
-    ]);
-    var status = responses[0];
-    var points = responses[1];
+    // 状态响应可能轮换 Cookie，等待更新后再查积分，避免同一会话并发轮换。
+    var status = await requestJson(result.account, "get", "/api/user/status", undefined, deadline);
     if (status.kind === "ok" && apiCode(status.data) === 0 && isObject(status.data.data)) {
       var who = identity(status.data.data);
       who.host = result.account.host;
@@ -450,8 +644,10 @@
       if (days !== null) result.details.push("剩余 " + decimal(days) + " 天");
       else result.warnings.push("状态响应缺少有效剩余天数");
     } else {
-      result.warnings.push("天数查询失败" + (status.kind !== "ok" ? "：" + transportMessage(status, false) : "：接口响应异常"));
+      result.warnings.push("天数查询失败：" + (status.kind !== "ok" ? transportMessage(status, false) : authenticationMessage(status.data) || "接口响应异常"));
     }
+    if (result.account.sessionCleared) return;
+    var points = await requestJson(result.account, "get", "/api/user/points", undefined, deadline);
     var balance = points.kind === "ok" && apiCode(points.data) === 0 ? numberValue(points.data.points) : null;
     if (balance !== null) result.details.push("积分 " + decimal(balance));
     else result.warnings.push("积分查询失败" + (points.kind !== "ok" ? "：" + transportMessage(points, false) : "：接口响应异常"));
@@ -474,10 +670,11 @@
     // 先让所有账号尝试签到，再查询附加信息，避免查询拖慢后续账号。
     for (var i = 0; i < store.accounts.length; i++) {
       var account = store.accounts[i];
+      account._runtime = { saved: JSON.stringify(account), warnings: [], blocked: false, error: "" };
       var result = await submitCheckin(account, deadline);
       result.account = account;
       result.details = [];
-      result.warnings = [];
+      result.warnings = account._runtime.warnings;
       results.push(result);
       if (i + 1 < store.accounts.length && deadline - Date.now() > ACCOUNT_INTERVAL_MS + 1500) {
         await new Promise(function (resolve) { setTimeout(resolve, ACCOUNT_INTERVAL_MS); });
