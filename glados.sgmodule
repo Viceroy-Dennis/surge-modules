@@ -1,0 +1,11 @@
+#!name=GLaDOS 多账号签到
+#!desc=登录后刷新控制台保存账号；每天 09:14（设备本地时区）签到，汇总积分、剩余天数和异常。需 Surge iOS 5.9+ / Mac 5.5+。
+#!arguments=script_url:https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/glados/glados-checkin.js,notify:always
+#!arguments-desc=script_url：Surge 配置目录中的脚本文件名，或自行托管的 HTTPS 原始脚本地址。notify：always 每次通知，failure 仅异常通知，off 关闭签到汇总通知。登录捕获仍会通知。
+
+[Script]
+GLaDOS-Capture = type=http-response, pattern=^https:\/\/(?:glados\.(?:network|rocks|one|space|cloud|vip)|glados-facility\.com)\/api\/user\/status\/?(?:\?|$), requires-body=true, max-size=65536, script-path={{{script_url}}}, timeout=10
+GLaDOS-Checkin = type=cron, cronexp="14 9 * * *", script-path={{{script_url}}}, argument="notify={{{notify}}}", timeout=180, wake-system=true
+
+[MITM]
+hostname = %APPEND% glados.network, glados.rocks, glados.one, glados.space, glados.cloud, glados.vip, glados-facility.com
