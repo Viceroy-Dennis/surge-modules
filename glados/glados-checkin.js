@@ -1,16 +1,18 @@
 /*
- * GLaDOS 多账号签到 — Surge iOS 5.9+ / Mac 5.5+
+ * GLaDOS 多账号签到 — 支持 full-header-mode 的 Surge iOS / Mac 6+
  * 配合 glados.sgmodule 使用；每天 09:14，设备本地时区。
  * 登录后刷新控制台，捕获 /api/user/status 的有效响应以保存账号。
  * 捕获与签到均接收会话 Cookie 轮换；模块须启用 full-header-mode。
  * 凭据仅存于本机 Surge $persistentStore；不要分享其存储导出。
- * 参数：notify=always|failure|off；手动管理：mode=list / mode=remove&id=1。
+ * 参数：notify=always|failure|off；capture_notify=always|changes。
+ * 手动管理：mode=list / mode=remove&id=1。
  */
 
 (function () {
   "use strict";
 
   var STORE_KEY = "glados_multi_accounts";
+  var CAPTURE_BUILD = "20261110-capture-1";
   var REQUEST_TIMEOUT_SECONDS = 12;
   var RUN_BUDGET_MS = 160000; // 模块 timeout=180，预留结束和通知时间。
   var ACCOUNT_INTERVAL_MS = 400;
@@ -285,23 +287,50 @@
     }
   }
 
-  function capture() {
-    if (typeof $response === "undefined" || !$request || !$response) return;
-    if (String($request.method || "").toUpperCase() !== "GET") return;
+  function captureLog(message) {
+    console.log("[GLaDOS Capture] " + message);
+  }
+
+  function captureSkipped(args, message, show) {
+    captureLog("未保存：" + message);
+    if (show && args.capture_notify === "always") notify("捕获已触发，未保存账号", message);
+  }
+
+  function capture(args) {
+    captureLog("build=" + CAPTURE_BUILD + " · 捕获脚本已触发");
+    if (typeof $response === "undefined" || !$request || !$response) {
+      return captureSkipped(args, "缺少 HTTP 响应，请使用模块中的 http-response 捕获条目", false);
+    }
+    if (String($request.method || "").toUpperCase() !== "GET") {
+      return captureSkipped(args, "请求方法不是 GET", false);
+    }
     var match = /^https:\/\/([^/?#]+)\/api\/user\/status\/?(?:\?[^#]*)?$/.exec($request.url || "");
     var host = match ? match[1].toLowerCase() : "";
-    if (HOSTS.indexOf(host) === -1) return;
+    if (HOSTS.indexOf(host) === -1) return captureSkipped(args, "请求不属于支持域名的 /api/user/status 接口", false);
     var status = statusCode($response);
-    if (status < 200 || status >= 300) return;
+    if (status === 304) return captureSkipped(args, "HTTP 304 没有响应正文，请在已登录浏览器打开 /api/user/status?capture=1 并更换末尾数字重试", true);
+    if (status < 200 || status >= 300) {
+      return captureSkipped(args, status ? "状态接口 HTTP " + status + "，请在浏览器确认已登录且完成验证" : "没有有效 HTTP 状态码，请检查 Surge 版本和捕获日志", true);
+    }
     var response = jsonObject($response.body);
-    if (!response || apiCode(response) !== 0 || !isObject(response.data)) return;
+    if (!response) return captureSkipped(args, "状态响应不是有效 JSON，可能是验证页面或缺少正文", true);
+    if (apiCode(response) !== 0) {
+      return captureSkipped(args, authenticationMessage(response) || "状态接口未返回成功码，请在当前浏览器完成登录后重试", true);
+    }
+    if (!isObject(response.data)) return captureSkipped(args, "状态响应缺少账号数据 data", true);
     var who = identity(response.data);
-    if (!who.email && !who.userId) return;
+    if (!who.email && !who.userId) return captureSkipped(args, "状态响应缺少邮箱和账号 ID，无法确定账号身份", true);
     var cookie = header($request.headers, "Cookie");
     var authorization = header($request.headers, "Authorization");
     var userAgent = header($request.headers, "User-Agent");
-    if ((!cookie && !authorization) || !validHeader(cookie) || !validHeader(authorization) ||
-      !validHeader(userAgent)) return;
+    captureLog("请求头=" + (Array.isArray($request.headers) ? "array" : "object") +
+      " · 响应头=" + (Array.isArray($response.headers) ? "array" : "object") +
+      " · Cookie=" + (cookie ? "有" : "无") + " · Authorization=" + (authorization ? "有" : "无") +
+      " · User-Agent=" + (userAgent ? "有" : "无"));
+    if (!cookie && !authorization) return captureSkipped(args, "请求头中没有 Cookie 或 Authorization，请确认使用已登录的同一浏览器", true);
+    if (!validHeader(cookie) || !validHeader(authorization) || !validHeader(userAgent)) {
+      return captureSkipped(args, "登录请求头格式异常，请重新登录后抓取", true);
+    }
 
     var requestPath = $request.url.slice($request.url.indexOf("/", 8)).split("?")[0];
     var session = mergeSessionCookies(cookie, $response.headers, host, requestPath);
@@ -339,7 +368,11 @@
       authorization: authorization,
       userAgent: userAgent
     };
-    if (previous && matches.length === 1 && JSON.stringify(previous) === JSON.stringify(account)) return;
+    if (previous && matches.length === 1 && JSON.stringify(previous) === JSON.stringify(account)) {
+      captureLog("已捕获，凭据未变化：" + accountLabel(account) + " · " + host);
+      if (args.capture_notify === "always") notify("已捕获，凭据未变化", accountLabel(account) + " · " + host + "\n账号已经保存在 Surge，可手动运行 GLaDOS-Checkin 验证签到。");
+      return;
+    }
     if (previous) {
       store.accounts = store.accounts.filter(function (item) { return matches.indexOf(item) === -1 || item === previous; });
       store.accounts[store.accounts.indexOf(previous)] = account;
@@ -348,13 +381,14 @@
       store.accounts.push(account);
     }
     saveStore(store);
+    captureLog((previous ? "账号凭据已更新：" : "已添加账号：") + accountLabel(account) + " · " + host);
     notify(previous ? "账号凭据已更新" : "已添加账号", accountLabel(account) + " · " + host +
       "\n当前共 " + store.accounts.length + " 个账号。" +
       (matches.length > 1 ? "已合并 " + (matches.length - 1) + " 条身份明确关联的重复记录。" : "可使用独立浏览器会话添加下一个账号。"));
   }
 
   function readArguments() {
-    var args = { mode: "checkin", notify: "always", id: "" };
+    var args = { mode: "checkin", notify: "always", capture_notify: "changes", id: "" };
     var text = typeof $argument === "string" ? $argument.trim() : "";
     if (text) {
       text.split("&").forEach(function (part) {
@@ -368,12 +402,13 @@
         } catch (_) {
           throw publicError("参数含有无效的 URL 编码。");
         }
-        if (["mode", "notify", "id"].indexOf(key) === -1) throw publicError("脚本包含不支持的参数。");
+        if (["mode", "notify", "capture_notify", "id"].indexOf(key) === -1) throw publicError("脚本包含不支持的参数。");
         args[key] = value;
       });
     }
     if (["checkin", "list", "remove"].indexOf(args.mode) === -1) throw publicError("mode 应为 checkin、list 或 remove。");
     if (["always", "failure", "off"].indexOf(args.notify) === -1) throw publicError("notify 应为 always、failure 或 off。");
+    if (["always", "changes"].indexOf(args.capture_notify) === -1) throw publicError("capture_notify 应为 always 或 changes。");
     if (args.mode === "remove" && !/^[1-9]\d*$/.test(args.id)) throw publicError("删除账号需要指定正整数 id，例如 mode=remove&id=1。");
     return args;
   }
@@ -703,11 +738,11 @@
   }
 
   async function main() {
+    var args = readArguments();
     if (typeof $request !== "undefined") {
-      capture();
+      capture(args);
       return;
     }
-    var args = readArguments();
     var store = loadStore();
     if (args.mode !== "checkin") manage(args, store);
     else await checkin(args, store);
@@ -715,7 +750,8 @@
 
   Promise.resolve().then(main).then(finish, function (error) {
     var message = error && error.publicMessage ? error.publicMessage : "脚本运行异常，请检查 Surge 版本和脚本配置。";
-    console.log("[GLaDOS] " + message);
+    if (typeof $request !== "undefined") captureLog("捕获失败：" + message);
+    else console.log("[GLaDOS] " + message);
     notify("运行异常", message);
     finish();
   });
