@@ -1,21 +1,13 @@
 #!name=蜗牛4K每日签到
-#!desc=蜗牛 I 4K（wn4k.com）每日签到 · 多账号。两种用法可混用：① 抓包——用哪个账号登录 wn4k.com 并打开一次「会员中心」，那个账号的 Cookie 就自动存进它自己的桶；换账号再登一次即可，多账号依次登录一遍。② 账号密码——在模块参数里填，多个账号用分号分隔，Cookie 过期会自动重登。每个账号有独立的 Cookie 和独立的签到记录，互不干扰；同账号的两种凭据会自动合并，不会重复签到。
-#!arguments=account:none
-#!arguments-desc=account：填「账号|密码」，多个账号用分号分隔。例：a@qq.com|p1;b@qq.com|p2;c@qq.com|p3。注意账号之间用分号、账号密码之间用竖线，不要用英文逗号（Surge 的脚本行按逗号切参数，带逗号会报参数无效）。留 none 表示只用抓包 Cookie。
+#!desc=根据QX签到脚本改写的Surge原生版。每天09:14（设备本地时区）多账号签到，附Cookie采集、手动签到和本地诊断。需Surge iOS 5.9+或Mac 5.5+。登录后打开会员中心或签到页面采集账号；QX及旧版Surge用户需重新采集。
 #!category=自动任务
 
 [Script]
-# 1a. 抓登录响应：登录成功那一刻的 Set-Cookie 直接存下来
-蜗牛4K抓登录 = type=http-response,pattern=^https?:\/\/(www\.)?wn4k\.com\/user\/login,argument={{{account}}},script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/wn4k/wn4k_task.js,script-update-interval=0
-
-# 1b. 抓普通请求：会员中心等页面上的 Cookie，多一层保险
-蜗牛4K抓Cookie = type=http-request,pattern=^https?:\/\/(www\.)?wn4k\.com\/user\/,argument={{{account}}},script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/wn4k/wn4k_task.js,script-update-interval=0
-
-# 2. 每天 09:14 自动签到（固定 09:14，避开整点并发）
-蜗牛4K每日签到 = type=cron,cronexp=14 9 * * *,timeout=120,argument={{{account}}},script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/wn4k/wn4k_task.js,script-update-interval=0
-
-# 3. 手动跑一次（Surge → 首页 → 脚本 → 点这条）
-蜗牛4K手动签到 = type=generic,timeout=120,argument={{{account}}},script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/wn4k/wn4k_task.js,script-update-interval=0
+# 请求头采集：只保存登录凭据，不在页面请求中执行签到。
+蜗牛4K抓Cookie = type=http-request, pattern=^https:\/\/(?:www\.)?wn4k\.com(?::443)?\/(?:user\/(?:index|info|checkin)(?:\.html)?\/?(?:\?.*)?$|index\.php\/user\/(?:index|info|checkin)(?:\.html)?\/?(?:\?.*)?$|index\.php\?s=(?:/|%2[Ff])user(?:/|%2[Ff])(?:index|info|checkin)(?:\.html)?(?:/|%2[Ff])?(?:&.*)?$), requires-body=false, timeout=10, script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/wn4k/wn4k_checkin.js, script-update-interval=0
+蜗牛4K每日签到 = type=cron, cronexp="14 9 * * *", wake-system=true, timeout=120, script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/wn4k/wn4k_checkin.js, script-update-interval=0
+蜗牛4K手动签到 = type=generic, timeout=120, script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/wn4k/wn4k_checkin.js, script-update-interval=0
+蜗牛4K本地诊断 = type=generic, argument=diagnose, timeout=10, script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/wn4k/wn4k_checkin.js, script-update-interval=0
 
 [MITM]
 hostname = %APPEND% wn4k.com, www.wn4k.com

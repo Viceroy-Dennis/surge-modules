@@ -1,0 +1,575 @@
+/*
+ * 蜗牛4K多账号签到 — Surge iOS 5.9+ / Mac 5.5+。
+ * 移植自 quantumultx-scripts/scripts/wn4k.qx.checkin.js。
+ * 安装 wn4k.sgmodule，每天 09:14（设备本地时区）执行。
+ * 开启 MITM 后，用 Safari 登录并打开会员中心或签到页面，逐个采集账号。
+ * http-request 只保存凭据；cron/generic 执行签到；argument=diagnose 只检查本地数据。
+ * The public site's check-in template verifies POST /user/checkin.html with no data.
+ * Credentials stay in $persistentStore. Do not export the account store to GitHub.
+ * QX 与 Surge 存储独立；旧 WN4K_CREDS 数据需重新采集，不读取账号密码参数。
+ */
+
+(function () {
+  "use strict";
+
+  const STORE = "wn4k.checkin.accounts.v1";
+  const LOCK = "wn4k.checkin.lock.v1";
+  const MAX_ATTEMPTS = 3;
+  const RUN_BUDGET_MS = 100000;
+  const MIN_REQUEST_BUDGET_MS = 12000;
+  const REQUEST_TIMEOUT_SECONDS = 10;
+  const MAX_BODY_LENGTH = 16384;
+  // Optional: the exact HTTPS check-in URL, if its action name is unrecognized.
+  const CHECKIN_URL = "";
+  const LOG_VERSION = "surge-native-2026-11-10";
+  const TEXT = {
+    title: "WN4K \u7b7e\u5230",
+    account: "\u8d26\u6237",
+    captured: "\u5df2\u4fdd\u5b58\u7b7e\u5230\u8bf7\u6c42",
+    updated: "\u5df2\u66f4\u65b0\u767b\u5f55\u51ed\u636e",
+    captureTip: "切换其他账号登录后，再打开会员中心或签到页面，即可添加多账号。",
+    noIdentity: "\u672a\u627e\u5230 user_id/user_name Cookie\uff0c\u672a\u4fdd\u5b58\u3002\u8bf7\u5148\u767b\u5f55\u3002",
+    unsupportedBody: "\u8bf7\u6c42\u4f53\u4e0d\u652f\u6301\u5b89\u5168\u91cd\u653e\uff0c\u672a\u4fdd\u5b58\u3002",
+    corrupt: "\u672c\u5730\u8d26\u6237\u6570\u636e\u635f\u574f\uff0c\u5df2\u505c\u6b62\uff0c\u4e0d\u4f1a\u8986\u76d6\u3002",
+    storage: "\u672c\u5730\u4fdd\u5b58\u5931\u8d25",
+    empty: "请先启用模块和 MITM，逐个登录账号并打开会员中心或签到页面采集凭据。",
+    ok: "\u7b7e\u5230\u6210\u529f",
+    already: "\u4eca\u65e5\u5df2\u7b7e\u5230",
+    expired: "登录失效，请重新登录后打开会员中心或签到页面更新凭据",
+    challenge: "\u9700\u8981\u9a8c\u8bc1\u6216\u6743\u9650\u53d7\u9650\uff0c\u8bf7\u5728\u7f51\u9875\u5904\u7406",
+    network: "\u7f51\u7edc\u8bf7\u6c42\u5931\u8d25",
+    unknown: "\u7b7e\u5230\u672a\u786e\u8ba4\uff0c\u8bf7\u68c0\u67e5\u7f51\u9875\u7b7e\u5230\u7ed3\u679c",
+    html: "返回 HTML 网页，未确认签到；请重新登录并打开签到页面更新凭据",
+    noCode: "\u8fd4\u56de JSON\uff0c\u4f46\u6ca1\u6709\u53ef\u8bc6\u522b\u7684\u7b7e\u5230 code",
+    emptyResponse: "\u8fd4\u56de\u7a7a\u54cd\u5e94\uff0c\u7b7e\u5230\u672a\u786e\u8ba4",
+    pageRequest: "保存的是 GET 签到页面；请更新模块后重新登录并打开签到页面采集",
+    redirect: "接口重定向，请重新登录并打开签到页面更新凭据",
+    unsafe: "\u5df2\u8df3\u8fc7\u4e0d\u53d7\u652f\u6301\u7684\u8bf7\u6c42",
+    busy: "\u4e0a\u4e00\u6b21\u4efb\u52a1\u4ecd\u5728\u6267\u884c",
+    deferred: "\u65f6\u95f4\u9884\u7b97\u4e0d\u8db3\uff0c\u4fdd\u7559\u81f3\u4e0b\u6b21\u4efb\u52a1",
+    stopped: "\u4efb\u52a1\u5df2\u505c\u6b62\uff0c\u672a\u786e\u8ba4\u7684\u8d26\u6237\u4e0d\u4f1a\u6807\u8bb0\u6210\u529f"
+  };
+
+  let finished = false;
+  let lockToken = "";
+  let watchdog;
+  const pendingRequests = new Set();
+  const mode = typeof $request !== "undefined" ? "capture" : (diagnosticRequested() ? "diagnose" : "task");
+  log("START version=" + LOG_VERSION + " mode=" + mode);
+
+  function log(message) {
+    // Only controlled status fields: never log URLs, headers, names or response bodies.
+    console.log("[WN4K] " + message);
+  }
+
+  function diagnosticRequested() {
+    return typeof $argument !== "undefined" && String($argument).trim() === "diagnose";
+  }
+
+  function diagnose() {
+    const accounts = readAccounts();
+    log("STATE accounts=" + accounts.length);
+    const legacy = !!($persistentStore.read("WN4K_CREDS") || $persistentStore.read("WN4K_CRED"));
+    log("STATE legacy-store=" + (legacy ? "present" : "absent"));
+    const lines = ["\u5df2\u8fdb\u5165\u811a\u672c\uff0c\u8bca\u65ad\u6a21\u5f0f\u4e0d\u53d1\u9001\u7b7e\u5230\u8bf7\u6c42\u3002", "\u5df2\u5f55\u5165\u8d26\u6237\uff1a" + accounts.length];
+    accounts.forEach((account, index) => {
+      const number = index + 1;
+      const cookie = !!header(account.headers, "cookie");
+      const matched = identity(account.headers) === account.id;
+      const endpoint = isSiteUrl(account.url) && isCheckin(account) && !isSensitive(account) && !isCheckinPage(account);
+      log("STATE account=" + number + " cookie=" + (cookie ? "present" : "absent") +
+        " identity=" + (matched ? "match" : "mismatch") + " endpoint=" + (endpoint ? "valid" : "invalid") +
+        " method=" + (/^(GET|POST)$/.test(account.method) ? account.method : "invalid") +
+        " today=" + (account.lastDay === today() ? "done" : "pending"));
+      lines.push(TEXT.account + number + ": Cookie " + (cookie ? "OK" : "\u7f3a\u5931") +
+        " / \u8d26\u6237\u5339\u914d " + (matched ? "OK" : "\u5931\u8d25") +
+        " / \u7b7e\u5230\u8bf7\u6c42 " + (endpoint ? "OK" : "\u65e0\u6548"));
+      if (isCheckinPage(account)) lines.push(TEXT.pageRequest);
+    });
+    if (!accounts.length) {
+      log("SKIP reason=NO_ACCOUNTS");
+      if (legacy) lines.push("\u68c0\u6d4b\u5230\u65e7\u7248\u5b58\u50a8\uff0c\u65b0\u7248\u9700\u91cd\u65b0\u91c7\u96c6\u3002");
+      lines.push(TEXT.empty);
+    }
+    notify("\u672c\u5730\u8bca\u65ad", lines.join("\n"));
+  }
+
+  function notify(subtitle, message) {
+    if (!finished) $notification.post(TEXT.title, subtitle, message || "");
+  }
+
+  function readAccounts() {
+    const raw = $persistentStore.read(STORE);
+    if (!raw) return [];
+    let value;
+    try { value = JSON.parse(raw); } catch (_) { throw new Error(TEXT.corrupt); }
+    if (!Array.isArray(value) || value.some(a => !a || typeof a.id !== "string")) {
+      throw new Error(TEXT.corrupt);
+    }
+    return value;
+  }
+
+  function writeAccounts(accounts) {
+    if (!$persistentStore.write(JSON.stringify(accounts), STORE)) {
+      throw new Error(TEXT.storage);
+    }
+  }
+
+  function header(headers, key) {
+    const name = Object.keys(headers || {}).find(k => k.toLowerCase() === key);
+    return name ? String(headers[name]) : "";
+  }
+
+  function cookies(value) {
+    const result = Object.create(null);
+    String(value || "").split(";").forEach(part => {
+      const position = part.indexOf("=");
+      if (position < 1) return;
+      const key = part.slice(0, position).trim();
+      const raw = part.slice(position + 1).trim();
+      try { result[key] = decodeURIComponent(raw); } catch (_) { result[key] = raw; }
+    });
+    return result;
+  }
+
+  function identity(headers) {
+    const values = cookies(header(headers, "cookie"));
+    if (/^[1-9]\d*$/.test(values.user_id || "")) return "uid:" + values.user_id;
+    if (values.user_name) return "name:" + values.user_name;
+    return "";
+  }
+
+  function safeHeaders(headers) {
+    const result = {};
+    const allowed = /^(cookie|authorization|user-agent|accept|accept-language|content-type|origin|referer|x-requested-with|x-csrf-token|x-xsrf-token|csrf-token)$/i;
+    Object.keys(headers || {}).forEach(key => {
+      if (allowed.test(key)) result[key.toLowerCase()] = String(headers[key]);
+    });
+    return result;
+  }
+
+  function isSiteUrl(url) {
+    return /^https:\/\/(?:www\.)?wn4k\.com(?::443)?\//i.test(url || "") && !/[\r\n]/.test(url);
+  }
+
+  function route(url) {
+    const path = String(url).replace(/^https:\/\/[^/]+/i, "").split("?")[0];
+    const query = String(url).split("?").slice(1).join("?");
+    const routed = query.match(/(?:^|&)s=([^&]*)/i);
+    if (routed) {
+      try { return decodeURIComponent(routed[1]); } catch (_) { return ""; }
+    }
+    return path;
+  }
+
+  function isSensitive(request) {
+    const path = route(request.url);
+    if (/(?:^|\/)(?:ajax_)?(?:login|logout|reg|register|signin|signout|reset|change_pwd)(?:[/.]|$)/i.test(path)) return true;
+    const content = String(request.body || "");
+    if (content.length > MAX_BODY_LENGTH) return true;
+    const sensitiveKey = /(?:^|[.\[])(?:user_)?(?:password|passwd|pwd|captcha|verify|otp)(?:\]|$)/i;
+    function formHasSecret(value) {
+      return value.split("&").some(part => {
+        try { return sensitiveKey.test(decodeURIComponent(part.split("=")[0].replace(/\+/g, " "))); }
+        catch (_) { return true; }
+      });
+    }
+    function objectHasSecret(value) {
+      return value && typeof value === "object" && Object.keys(value).some(key =>
+        sensitiveKey.test(key) || objectHasSecret(value[key]));
+    }
+    const query = String(request.url).split("?").slice(1).join("?");
+    if (formHasSecret(query)) return true;
+    if (/^\s*[\[{]/.test(content)) {
+      try { return !!objectHasSecret(JSON.parse(content)); } catch (_) { return true; }
+    }
+    return formHasSecret(content);
+  }
+
+  function isCheckin(request) {
+    if (CHECKIN_URL && request.url === CHECKIN_URL) return true;
+    if (/\/(?:ajax_)?(?:check_?in|qiandao|sign|daily_sign)(?:\.html)?\/?$/i.test(route(request.url))) return true;
+    let params = {};
+    try {
+      if (/^\s*\{/.test(request.body || "")) params = JSON.parse(request.body);
+      else {
+        String(request.body || "").split("&").forEach(part => {
+          const pair = part.split("=");
+          params[decodeURIComponent(pair[0])] = decodeURIComponent(pair.slice(1).join("="));
+        });
+      }
+    } catch (_) { return false; }
+    return [params.action, params.act, params.ac].some(value => /^(check_?in|qiandao|daily_sign)$/.test(value || ""));
+  }
+
+  function isCheckinPage(request) {
+    // This HTML page shares its path with a POST action; GET is not a sign-in action.
+    return String(request.method || "GET").toUpperCase() === "GET" &&
+      /\/user\/checkin(?:\.html)?\/?$/i.test(route(request.url));
+  }
+
+  function verifiedPostAccount(id, headers, old, number, url) {
+    const origin = url.match(/^https:\/\/(?:www\.)?wn4k\.com(?::443)?/i)[0];
+    const result = Object.assign({}, old, {
+      id,
+      label: old.label || TEXT.account + number,
+      url: origin + "/user/checkin.html",
+      method: "POST",
+      headers: safeHeaders(headers),
+      body: "",
+      updatedAt: Date.now()
+    });
+    result.headers["x-requested-with"] = "XMLHttpRequest";
+    result.headers.accept = "application/json, text/javascript, */*; q=0.01";
+    result.headers["content-type"] = "application/x-www-form-urlencoded; charset=UTF-8";
+    result.headers.origin = origin;
+    result.headers.referer = origin + "/user/checkin.html";
+    return result;
+  }
+
+  function capture(request) {
+    if (!isSiteUrl(request.url) || isSensitive(request)) return;
+    const method = String(request.method || "GET").toUpperCase();
+    const page = isCheckinPage(request);
+    const checkin = !page && isCheckin(request);
+    const memberPage = page || (method === "GET" && /\/user\/(?:index|info)(?:\.html)?\/?$/i.test(route(request.url)));
+    if (!checkin && !memberPage) { log("CAPTURE skipped=NON_CHECKIN_ROUTE"); return; }
+    const id = identity(request.headers);
+    if (!id) {
+      log("CAPTURE skipped=NO_IDENTITY");
+      if (checkin) notify(TEXT.noIdentity);
+      return;
+    }
+    const accounts = readAccounts();
+    const index = accounts.findIndex(a => a.id === id);
+    const headers = safeHeaders(request.headers);
+    if (memberPage && (index < 0 || isCheckinPage(accounts[index]))) {
+      // A page view provides credentials; its GET method is never replayed.
+      const number = index < 0 ? accounts.length + 1 : index + 1;
+      const account = verifiedPostAccount(id, headers, index < 0 ? {} : accounts[index], number, request.url);
+      if (index < 0) accounts.push(account);
+      else accounts[index] = account;
+      writeAccounts(accounts);
+      log("CAPTURE saved account=" + number + " method=POST source=VERIFIED_TEMPLATE accounts=" + accounts.length);
+      notify(account.label + " - " + TEXT.captured, "\u5df2\u4fdd\u5b58\u672c\u5730\u51ed\u636e\uff0c\u4efb\u52a1\u4f7f\u7528\u5df2\u6838\u5b9e\u7684 POST \u7b7e\u5230\u63a5\u53e3\u3002");
+      return;
+    }
+    if (!checkin) {
+      // Member-page requests refresh cookies, not endpoint-specific CSRF headers.
+      const account = accounts[index];
+      ["cookie", "authorization", "user-agent"].forEach(key => {
+        if (headers[key]) account.headers[key] = headers[key];
+      });
+      account.updatedAt = Date.now();
+      writeAccounts(accounts);
+      log("CAPTURE updated=COOKIE account=" + (index + 1));
+      return;
+    }
+    if (!/^(GET|POST)$/.test(method) ||
+        (request.body !== undefined && request.body !== null && typeof request.body !== "string") ||
+        (!request.body && request.bodyBytes && request.bodyBytes.byteLength > 0) ||
+        (method === "POST" && request.body == null &&
+          !/\/user\/checkin(?:\.html)?\/?$/i.test(route(request.url))) ||
+        String(request.body || "").length > MAX_BODY_LENGTH) {
+      notify(TEXT.unsupportedBody);
+      log("CAPTURE skipped=UNSUPPORTED_BODY");
+      return;
+    }
+    const old = index < 0 ? {} : accounts[index];
+    const account = Object.assign({}, old, {
+      id,
+      label: old.label || TEXT.account + (index < 0 ? accounts.length + 1 : index + 1),
+      url: request.url,
+      method,
+      headers,
+      body: method === "POST" ? String(request.body || "") : "",
+      updatedAt: Date.now()
+    });
+    if (/\/user\/checkin(?:\.html)?\/?$/i.test(route(request.url)) && method === "POST") {
+      const defaults = verifiedPostAccount(id, headers, old, index < 0 ? accounts.length + 1 : index + 1, request.url);
+      account.headers = defaults.headers;
+    }
+    const changed = index < 0 || JSON.stringify(old.headers) !== JSON.stringify(account.headers) ||
+      old.url !== account.url || old.body !== account.body || old.method !== method;
+    if (index < 0) accounts.push(account);
+    else accounts[index] = account;
+    writeAccounts(accounts);
+    log("CAPTURE saved account=" + (index < 0 ? accounts.length : index + 1) + " accounts=" + accounts.length);
+    if (changed) notify(account.label + " - " + (index < 0 ? TEXT.captured : TEXT.updated), TEXT.captureTip);
+  }
+
+  function today() {
+    // Deliberately use a UTC+8 calendar, independent of the device timezone.
+    return new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  }
+
+  function messageOf(body) {
+    return String(body.msg || body.message || "");
+  }
+
+  function inspectResponse(response) {
+    const text = typeof response.body === "string" ? response.body : "";
+    const clean = text.replace(/^\uFEFF/, "").trim();
+    const mime = header(response.headers, "content-type").split(";")[0].trim().toLowerCase();
+    const content = /^(application\/json|text\/json)$/.test(mime) ? "JSON" :
+      (mime === "text/html" ? "HTML" : (mime ? "OTHER" : "UNSPECIFIED"));
+    let format = "EMPTY";
+    let body;
+    let marker = "none";
+    if (clean) {
+      try {
+        body = JSON.parse(clean);
+        format = !body || typeof body !== "object" ? "JSON_VALUE" :
+          (Array.isArray(body) ? "JSON_ARRAY" : "JSON_OBJECT");
+      } catch (_) {
+        format = /^(?:<!doctype\s+html|<html\b)|<(?:head|body|form|title)\b/i.test(clean) ? "HTML" : "TEXT";
+        if (format === "HTML") {
+          if (/user_pwd|<form[^>]+action=["'][^"']*\/user\/login|<title>[^<]*(?:\u7528\u6237\u767b\u5f55|\u767b\u5f55)/i.test(clean)) marker = "login";
+          else if (/cf-chl-|challenge-platform|<title>\s*(?:Just a moment|Attention Required)|<form[^>]+captcha/i.test(clean)) marker = "challenge";
+        }
+      }
+    }
+    let code = "none";
+    if (body && !Array.isArray(body) && typeof body === "object" && /^-?\d{1,9}$/.test(String(body.code))) {
+      code = String(body.code);
+    }
+    return { format, content, marker, body, code, length: text.length };
+  }
+
+  function classify(response) {
+    const status = Number(response.statusCode);
+    if (!Number.isInteger(status) || status < 100 || status > 599) return { kind: "failed", message: TEXT.unknown };
+    if (status === 401) return { kind: "failed", message: TEXT.expired };
+    if (status === 403) return { kind: "failed", message: TEXT.challenge };
+    if (status >= 300 && status < 400) return { kind: "failed", message: TEXT.redirect };
+    if ([408, 425, 429].includes(status) || status >= 500) {
+      return { kind: "retry", message: "HTTP " + status, retryAfter: header(response.headers, "retry-after") };
+    }
+    if (status < 200 || status >= 300) return { kind: "failed", message: "HTTP " + status };
+    const details = inspectResponse(response);
+    if (details.format === "EMPTY") return { kind: "failed", message: TEXT.emptyResponse };
+    if (details.format === "HTML") return { kind: "failed", message:
+      details.marker === "login" ? TEXT.expired : (details.marker === "challenge" ? TEXT.challenge : TEXT.html) };
+    if (!/^JSON_/.test(details.format)) return { kind: "failed", message: TEXT.unknown };
+    const body = details.body;
+    if (!body || typeof body !== "object") return { kind: "failed", message: TEXT.unknown };
+    const message = messageOf(body);
+    if (/(?:\u672a\u767b\u5f55|\u8bf7.*\u767b\u5f55|\u767b\u5f55.*(?:\u5931\u6548|\u8fc7\u671f)|not logged|unauthorized)/i.test(message)) {
+      return { kind: "failed", message: TEXT.expired };
+    }
+    if (/(?:\u9a8c\u8bc1\u7801|\u9a57\u8b49\u78bc|captcha|csrf|token.*(?:expired|invalid)|\u5c01\u7981|\u53d7\u9650)/i.test(message) || Number(body.code) === 1004) {
+      return { kind: "failed", message: TEXT.challenge };
+    }
+    if (/(?:\u7a0d\u540e\u91cd\u8bd5|\u7cfb\u7edf\u7e41\u5fd9|too many requests|temporarily unavailable)/i.test(message)) {
+      return { kind: "retry", message: TEXT.unknown };
+    }
+    if (/(?:\u5931\u8d25|\u672a\u6210\u529f|\u672a\u7b7e\u5230|failed|failure)/i.test(message)) {
+      return { kind: "failed", message: TEXT.unknown };
+    }
+    // The public check-in template explicitly handles 1001 as already checked in.
+    if (body.code === 1001 || body.code === "1001" ||
+        /(?:已(?:经)?(?:完成)?\s*(?:签到|签过|簽到)|请勿重复(?:签到|簽到)|already.{0,20}(?:check.?in|signed))/i.test(message)) {
+      return { kind: "ok", message: TEXT.already };
+    }
+    // MacCMS's public login JS uses code === 1. Do not treat HTTP 200 as success.
+    if (body.code === 1 || body.code === "1") return { kind: "ok", message: TEXT.ok };
+    return { kind: "failed", message: details.code === "none" ? TEXT.noCode : TEXT.unknown };
+  }
+
+  function markSuccess(id, day) {
+    const accounts = readAccounts();
+    const account = accounts.find(a => a.id === id);
+    if (account) {
+      account.lastDay = day;
+      writeAccounts(accounts);
+    }
+  }
+
+  function markAttempt(id) {
+    const accounts = readAccounts();
+    const account = accounts.find(a => a.id === id);
+    if (account) {
+      account.lastAttemptAt = Date.now();
+      writeAccounts(accounts);
+    }
+  }
+
+  function retryDelay(result, attempt) {
+    if (result.retryAfter) {
+      const seconds = Number(result.retryAfter);
+      const delay = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(result.retryAfter) - Date.now();
+      if (Number.isFinite(delay) && delay > 0) return Math.max(delay, 1000);
+    }
+    return 1500 * Math.pow(2, attempt - 1);
+  }
+
+  function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+  function cancelTimer(timer) {
+    // Surge's JSC engine need not expose clearTimeout; guards also stop late work.
+    if (timer !== undefined && typeof clearTimeout === "function") clearTimeout(timer);
+  }
+
+  function http(request) {
+    return new Promise((resolve, reject) => {
+      if (finished) { reject(new Error("TASK_FINISHED")); return; }
+      let settled = false;
+      let timer;
+      const settle = (error, response) => {
+        if (settled) return;
+        settled = true;
+        cancelTimer(timer);
+        pendingRequests.delete(cancel);
+        if (error) reject(new Error("NETWORK_ERROR"));
+        else resolve(response);
+      };
+      const cancel = () => settle(true);
+      pendingRequests.add(cancel);
+      // Guard a missing native callback as well as the native HTTP timeout.
+      timer = setTimeout(cancel, REQUEST_TIMEOUT_SECONDS * 1000 + 500);
+      try {
+        $httpClient[request.method.toLowerCase()](request, (error, response, data) => {
+          if (settled || finished) return;
+          settle(error || !response, {
+            statusCode: response && (response.status !== undefined ? response.status : response.statusCode),
+            headers: response && response.headers || {},
+            body: typeof data === "string" ? data : ""
+          });
+        });
+      } catch (_) { settle(true); }
+    });
+  }
+
+  function finish() {
+    if (finished) return;
+    finished = true;
+    cancelTimer(watchdog);
+    pendingRequests.forEach(cancel => cancel());
+    if (lockToken && $persistentStore.read(LOCK) === lockToken) $persistentStore.write("", LOCK);
+    log("END mode=" + mode);
+    if (mode === "capture") $done({});
+    else $done();
+  }
+
+  async function run() {
+    const accounts = readAccounts();
+    log("STATE accounts=" + accounts.length);
+    if (!accounts.length) { log("SKIP reason=NO_ACCOUNTS"); notify(TEXT.empty); return; }
+    const now = Date.now();
+    const existing = Number($persistentStore.read(LOCK));
+    if (existing > now) { log("SKIP reason=BUSY"); notify(TEXT.busy); return; }
+    lockToken = String(now + RUN_BUDGET_MS + 30000);
+    if (!$persistentStore.write(lockToken, LOCK)) throw new Error(TEXT.storage);
+    const deadline = now + RUN_BUDGET_MS;
+    let repaired = false;
+    accounts.forEach((account, index) => {
+      if (!isCheckinPage(account) || !isSiteUrl(account.url) || isSensitive(account) ||
+          identity(account.headers) !== account.id) return;
+      accounts[index] = verifiedPostAccount(account.id, account.headers, account, index + 1, account.url);
+      log("REPAIR account=" + (index + 1) + " GET_PAGE_TO_VERIFIED_POST");
+      repaired = true;
+    });
+    if (repaired) writeAccounts(accounts);
+    const lines = [];
+    watchdog = setTimeout(() => {
+      if (finished) return;
+      log("STOP reason=RUN_BUDGET");
+      notify(TEXT.stopped, lines.join("\n"));
+      finish();
+    }, RUN_BUDGET_MS);
+
+    // Finish pending accounts first, even if earlier accounts were captured first.
+    accounts.sort((a, b) => Number(a.lastDay === today()) - Number(b.lastDay === today()) ||
+      (Number(a.lastAttemptAt) || 0) - (Number(b.lastAttemptAt) || 0));
+    for (const snapshot of accounts) {
+      if (finished) return;
+      const account = readAccounts().find(a => a.id === snapshot.id);
+      if (!account) continue;
+      const label = account.label || TEXT.account;
+      const number = accounts.indexOf(snapshot) + 1;
+      if (account.lastDay === today()) {
+        log("SKIP account=" + number + " reason=TODAY_DONE");
+        lines.push(label + ": " + TEXT.already); continue;
+      }
+      if (isCheckinPage(account)) {
+        log("SKIP account=" + number + " reason=CHECKIN_PAGE_NOT_ACTION");
+        lines.push(label + ": " + TEXT.pageRequest);
+        continue;
+      }
+      if (!isSiteUrl(account.url) || !/^(GET|POST)$/.test(account.method) ||
+          identity(account.headers) !== account.id || typeof account.body !== "string" ||
+          account.body.length > MAX_BODY_LENGTH || isSensitive(account) || !isCheckin(account)) {
+        lines.push(label + ": " + TEXT.unsafe);
+        log("SKIP account=" + number + " reason=INVALID_REQUEST");
+        continue;
+      }
+      let result = { kind: "failed", message: TEXT.deferred };
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        if (finished) return;
+        if (deadline - Date.now() < MIN_REQUEST_BUDGET_MS) {
+          result = { kind: "failed", message: TEXT.deferred };
+          log("SKIP account=" + number + " reason=RUN_BUDGET");
+          break;
+        }
+        const requestDay = today();
+        const request = {
+          url: account.url,
+          method: account.method,
+          headers: safeHeaders(account.headers),
+          timeout: REQUEST_TIMEOUT_SECONDS,
+          // Surge options belong at the top level, not inside Quantumult X opts.
+          "auto-redirect": false,
+          "auto-cookie": false
+        };
+        if (account.method === "POST") request.body = account.body;
+        markAttempt(account.id);
+        log("REQUEST account=" + number + " method=" + account.method + " attempt=" + attempt);
+        try {
+          const response = await http(request);
+          if (finished) return;
+          result = classify(response);
+          const status = Number(response.statusCode);
+          const details = inspectResponse(response);
+          log("RESULT account=" + number + " HTTP=" + (Number.isInteger(status) ? status : "invalid") +
+            " code=" + details.code + " kind=" + result.kind + " format=" + details.format +
+            " content=" + details.content + " marker=" + details.marker + " length=" + details.length);
+        } catch (_) {
+          if (finished) return;
+          result = { kind: "retry", message: TEXT.network };
+          log("RESULT account=" + number + " kind=retry reason=NETWORK_ERROR");
+        }
+        if (finished) return;
+        if (result.kind === "ok") {
+          // A request crossing midnight is not credited to the following day.
+          if (requestDay === today()) markSuccess(account.id, requestDay);
+          break;
+        }
+        if (result.kind !== "retry" || attempt === MAX_ATTEMPTS) break;
+        const delay = retryDelay(result, attempt);
+        if (deadline - Date.now() < delay + MIN_REQUEST_BUDGET_MS) {
+          result.message = TEXT.deferred;
+          break;
+        }
+        log("RETRY account=" + number + " next=" + (attempt + 1));
+        await sleep(delay);
+      }
+      lines.push(label + ": " + result.message);
+      if (deadline - Date.now() > MIN_REQUEST_BUDGET_MS) await sleep(1000);
+    }
+    if (!finished) notify(TEXT.title, lines.join("\n"));
+  }
+
+  if (typeof $request !== "undefined") {
+    try { capture($request); } catch (error) {
+      log("ERROR mode=capture reason=" + (error.message === TEXT.corrupt ? "CORRUPT_STORE" : "CAPTURE_FAILED"));
+      notify(error.message === TEXT.corrupt ? TEXT.corrupt : TEXT.storage);
+    }
+    finish();
+  } else {
+    const execution = mode === "diagnose" ? Promise.resolve().then(diagnose) : run();
+    execution.catch(error => {
+      log("ERROR mode=" + mode + " reason=" + (error.message === TEXT.corrupt ? "CORRUPT_STORE" : "RUN_FAILED"));
+      if (!finished) notify(error.message === TEXT.corrupt ? TEXT.corrupt : TEXT.stopped);
+    }).finally(finish);
+  }
+})();
