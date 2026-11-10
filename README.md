@@ -23,7 +23,7 @@ https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/bilibili.sgm
 
 ---
 
-## 2. 三国咸话每日任务
+## 2. 三国咸话每日与每周任务
 
 **模块安装 URL**（Surge → 模块 → 安装 → 粘贴）：
 ```text
@@ -32,10 +32,14 @@ https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/xianhua.sgmo
 
 | 文件路径 | 说明 |
 |---|---|
-| `xianhua.sgmodule` | 模块本体：自动任务、凭据抓包、手动测试与体检入口 |
-| `xianhua/xianhua_task.js` | 每日自动全套任务（打开小程序 + 每日签到 + 自动点赞10次 + 自动浏览3次 + 自动分享1次 + 自动领奖） |
-| `xianhua/xianhua_test.js` | 综合体检与诊断（检查凭据有效性/时间戳/任务列表状态） |
-| `xianhua/xianhua_capture.js` | 登录凭据抓包（微信进入小程序自动抓，降噪仅更新时通知） |
+| `xianhua.sgmodule` | 每天09:14自动任务、凭据采集、手动执行和只读查询入口 |
+| `xianhua/xianhua_task.js` | Surge原生主任务：每日签到/点赞/浏览/分享、周战报、热力竹逐档领奖及状态复查 |
+| `xianhua/xianhua_test.js` | 只读社区任务诊断，不执行任务或领取奖励 |
+| `xianhua/xianhua_capture.js` | 只读请求头，独立保存微信与H5凭据，通知节流 |
+| `xianhua/README.md` | 安装、更新、重新采集凭据及各入口说明 |
+| `tests/xianhua.surge.*.test.cjs` | 原生回调、完整工作流、凭据隔离、通知及超时的离线验证 |
+
+支持 **Surge iOS 5.9.0+ / Mac 5.5.0+**。安装或更新后依次打开小程序**首页、福利页、热力竹页面**重新采集凭据，再运行「三国咸话手动执行」。请更新模块和脚本缓存，确认自动任务使用 `xianhua_task.js` 且为每天 **09:14（设备本地时区）**。QX与Surge存储独立；旧版Surge混存的H5凭据也需要重新采集。
 
 ---
 

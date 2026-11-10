@@ -1,19 +1,15 @@
-#!name=三国咸话每日任务
-#!desc=三国咸话小程序自动任务 v3.6（与 QX 正式版同步）：打开小程序 + 每日签到 + 点赞10次 + 浏览3次(全链) + 分享 + getReward 自动领奖（st1=待领）+ [object Null] 脏头过滤。
+#!name=三国咸话每日与每周任务
+#!desc=每天09:14执行签到、点赞10次、浏览3次、分享1次、周任务与热力竹领奖；支持Surge iOS 5.9+或Mac 5.5+。
 #!arguments=capture:咸话抓包
-#!arguments-desc=登录凭据抓包默认开启（参数值即脚本名）。打开微信三国咸话小程序即可自动捕获凭据；抓取成功后把参数改成 # 即可关闭抓包。
+#!arguments-desc=凭据采集默认开启。安装或更新后依次打开微信三国咸话小程序首页、福利页、热力竹页面；采集成功后将参数设为#可停用采集。
 #!category=自动任务
 
 [Script]
-# 1. 登录凭据抓包 (全线域名支持，智能节流 8 秒弹 1 次通知确认，自动捕获真实领奖接口，[object Null] 脏头过滤)
-{{{capture}}} = type=http-request,pattern=^https:\/\/(api-xh|wxforum|xh|hi-gateway|api-forum-act|xianhua)\.sanguosha\.cn\/,requires-body=true,max-size=262144,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/xianhua/xianhua_capture.js,script-update-interval=0
-
-# 2. 定时任务 (每天 09:15 自动执行；全链 30+ 请求，timeout 提至 120s)
-三国咸话自动任务 = type=cron,cronexp=15 9 * * *,timeout=120,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/xianhua/xianhua_task_v3.js,script-update-interval=0
-
-# 3. 手动测试与诊断入口
-三国咸话手动执行 = type=generic,timeout=120,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/xianhua/xianhua_task_v3.js,script-update-interval=0
-三国咸话体检测试 = type=generic,timeout=30,script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/xianhua/xianhua_test.js,script-update-interval=0
+{{{capture}}} = type=http-request, pattern=^https:\/\/(api-xh|wxforum|xh|hi-gateway|api-forum-act|xianhua)\.sanguosha\.cn\/, requires-body=false, timeout=10, script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/xianhua/xianhua_capture.js, script-update-interval=0
+三国咸话自动任务 = type=cron, cronexp="14 9 * * *", timeout=120, script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/xianhua/xianhua_task.js, script-update-interval=0
+三国咸话手动执行 = type=generic, timeout=120, script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/xianhua/xianhua_task.js, script-update-interval=0
+三国咸话任务列表 = type=generic, argument=mode=list, timeout=15, script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/xianhua/xianhua_task.js, script-update-interval=0
+三国咸话体检测试 = type=generic, timeout=15, script-path=https://raw.githubusercontent.com/Viceroy-Dennis/surge-modules/main/xianhua/xianhua_test.js, script-update-interval=0
 
 [MITM]
 hostname = %APPEND% api-xh.sanguosha.cn, wxforum.sanguosha.cn, xh.sanguosha.cn, hi-gateway.sanguosha.cn, api-forum-act.sanguosha.cn, xianhua.sanguosha.cn
